@@ -1,0 +1,5 @@
+<library path="shaoshao_norm_critic">
+  <class name="mppi::critics::ShaoShaoNormCritic" type="mppi::critics::ShaoShaoNormCritic" base_class_type="mppi::critics::CriticFunction">
+    <description>Coupled planar speed envelope for mecanum trajectories.</description>
+  </class>
+</library>

@@ -1,0 +1,12 @@
+sensor_msgs/PointCloud2 source
+geometry_msgs/Pose initial_guess
+---
+bool converged
+geometry_msgs/Pose transform
+float64 normalized_error
+float64 overlap
+float64 min_eigenvalue
+float64 condition_number
+uint32 inliers
+uint32 points
+string error

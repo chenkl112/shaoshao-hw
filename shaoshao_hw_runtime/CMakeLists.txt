@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.16)
+project(shaoshao_hw_runtime)
+find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
+ament_python_install_package(shaoshao_hw PACKAGE_DIR ../shaoshao_hw)
+install(PROGRAMS scripts/index_recorder scripts/localizer DESTINATION lib/${PROJECT_NAME})
+ament_package()
