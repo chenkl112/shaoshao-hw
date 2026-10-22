@@ -26,7 +26,11 @@ def generate_launch_description():
            Node(package='hw_registration',executable='registration_server',name='hw_registration',
                 parameters=[{'map_path':str(Path(maps)/'site.pcd'),'voxel_m':float(registration['voxel_m']),'threads':2}],output='screen'),
            Node(package='shaoshao_hw_runtime',executable='localizer',name='hw_localizer',
-                parameters=[{'config_path':config,'maps_dir':maps}],output='screen')]
+                parameters=[{'config_path':config,'maps_dir':maps}],output='screen'),
+           Node(package='hw_omni_controller',executable='obstacle_predictor',name='hw_obstacle_predictor',
+                parameters=[params],output='screen'),
+           Node(package='hw_omni_controller',executable='command_relay',name='hw_command_relay',
+                parameters=[params],output='screen')]
     for transform in frames['static_transforms']:
         x,y,z=transform['xyz']
         nodes.append(Node(package='tf2_ros',executable='static_transform_publisher',

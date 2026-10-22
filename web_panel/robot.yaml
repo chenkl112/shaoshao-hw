@@ -24,6 +24,13 @@ navigation:
   max_speed_mps: 0.5
   map_resolution_m: 0.025
   reference_point: yaw_axis
+  # Initial whole-vehicle model, NOT coefficients identified on this robot.
+  mpc:
+    tau_x_s: 0.30
+    tau_y_s: 0.30
+    feedback_timeout_s: 0.15
+    prediction_timeout_s: 0.30
+    obstacle_margin_m: 0.15
 network:
   host_ip: 192.168.10.100              # 雷达专用网口 IP，待测
   lidar_ip: 192.168.10.101             # MID360 实际 IP，待测

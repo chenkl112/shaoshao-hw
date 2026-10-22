@@ -1,4 +1,4 @@
-"""HW-inspired global registration and holonomic MPPI behind the Shaoshao Web API."""
+"""Indexed localization and HW FDDP control behind the Shaoshao Web API."""
 import json
 import math
 from pathlib import Path
@@ -13,7 +13,7 @@ import yaml
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from shaoshao_hw.config import load
 from shaoshao_hw.index import RetrievalIndex
-from shaoshao_hw.motion import MotionLimiter,CollisionGrid
+from shaoshao_hw.chassis import Feedback,FeedbackGate
 from navcar_navigation_legacy import navigation_geometry,localization_quality
 from navcar_navigation_legacy import NavigationControl as BaseControl,NavigationBridge as BaseBridge
 from navcar_navigation_legacy import build_navigation_config as base_config
@@ -35,27 +35,17 @@ def build_navigation_config(root,maps,initial_pose=None):
     params.pop('amcl',None)
     speed=nav['max_speed_mps']
     ctrl=params['controller_server']['ros__parameters']
-    ctrl.update(odom_duration=.1,speed_limit_topic='/navcar/speed_limit')
+    ctrl.update(odom_duration=.1,speed_limit_topic='/navcar/speed_limit',enable_stamped_cmd_vel=True)
     ctrl['FollowPath']={
-      'plugin':'nav2_mppi_controller::MPPIController','motion_model':'Omni',
-      'time_steps':40,'model_dt':.05,'batch_size':1000,'iteration_count':1,
-      'vx_max':speed,'vx_min':-speed,'vy_max':speed,'wz_max':0.,
-      # MPPI divides its control regularization by variance: zero noise gives
-      # NaN even with a zero angular bound. The motion model still clamps wz=0.
-      'vx_std':.2,'vy_std':.2,'wz_std':1e-6,'ax_max':.3,'ax_min':-.3,'ay_max':.3,'ay_min':-.3,
-      'az_max':.3,'temperature':.3,'gamma':.015,'prune_distance':2.,
-      'transform_tolerance':.3,'visualize':False,'regenerate_noises':False,
-      'critics':['ShaoShaoNormCritic','ConstraintCritic','CostCritic','GoalCritic','PathAlignCritic','PathFollowCritic'],
-      'ShaoShaoNormCritic':{'enabled':True,'max_speed_mps':speed},
-      'ConstraintCritic':{'enabled':True,'cost_power':1,'cost_weight':4.},
-      'CostCritic':{'enabled':True,'cost_power':1,'cost_weight':3.81,'critical_cost':253.,
-                    'collision_cost':1000000.,'consider_footprint':True,'near_goal_distance':.3},
-      'GoalCritic':{'enabled':True,'cost_power':1,'cost_weight':5.,'threshold_to_consider':1.4},
-      'PathAlignCritic':{'enabled':True,'cost_power':1,'cost_weight':14.,'threshold_to_consider':.3,
-                         'use_path_orientations':False,'trajectory_point_step':2,'offset_from_furthest':5},
-      'PathFollowCritic':{'enabled':True,'cost_power':1,'cost_weight':5.,'threshold_to_consider':.3,'offset_from_furthest':5}}
+      'plugin':'hw_omni_controller::Controller','max_speed_mps':speed,
+      'acceleration_mps2':min(nav['motion']['acceleration_mps2'],nav['motion']['deceleration_mps2']),
+      'jerk_mps3':nav['motion']['jerk_mps3'],
+      'collision_radius_m':frames['robot_radius_m']+.02,**nav['mpc']}
+    ctrl['goal_checker'].update(plugin='nav2_controller::StoppedGoalChecker',
+        trans_stopped_velocity=.03,rot_stopped_velocity=100.)
     local=params['local_costmap']['local_costmap']['ros__parameters']
-    local.update(width=3,height=3,publish_frequency=10.,track_unknown_space=True,always_send_full_costmap=True)
+    local.update(global_frame='map',width=4,height=4,publish_frequency=10.,
+                 track_unknown_space=True,always_send_full_costmap=True)
     # MPPI footprint mode requires an explicit polygon. Encode the padded circle
     # as a circumscribed 64-gon; avoid costmap's axis-wise padding expanding a
     # circle by sqrt(2)*padding at diagonal headings.
@@ -66,6 +56,13 @@ def build_navigation_config(root,maps,initial_pose=None):
         cost=params[name][name]['ros__parameters']
         cost['footprint']=json.dumps(footprint);cost['footprint_padding']=0.
     params['bt_navigator']['ros__parameters']['default_nav_to_pose_bt_xml']=str(root/'shaoshao/web_panel/navcar_translation.xml')
+    params['hw_obstacle_predictor']={'ros__parameters':{
+        **nav['obstacles'],'map_path':str(maps/'site.pcd'),
+        'lidar_height_m':float(config['robot']['lidar_height_m'])}}
+    params['hw_command_relay']={'ros__parameters':{
+        'max_speed_mps':speed,'deceleration_mps2':min(nav['motion']['acceleration_mps2'],nav['motion']['deceleration_mps2']),
+        'jerk_mps3':nav['motion']['jerk_mps3'],'collision_radius_m':frames['robot_radius_m']+.02,
+        'feedback_timeout_s':nav['mpc']['feedback_timeout_s']}}
     (output/'frames.yaml').write_text(yaml.safe_dump(frames,sort_keys=False))
     (output/'nav2.yaml').write_text(yaml.safe_dump(params,sort_keys=False))
     return output
@@ -76,12 +73,14 @@ class NavigationControl(BaseControl):
         p=self.panel
         if self.error or self.starting or self.stopping or not self.running:return super().reason()
         if not p.nav_localized:return getattr(p.bridge,'localization_info',{}).get('message','等待自动定位')
+        if p.bridge and not p.bridge.chassis_gate.ready(p.bridge.node.get_clock().now().nanoseconds*1e-9):
+            return p.bridge.chassis_gate.reason(p.bridge.node.get_clock().now().nanoseconds*1e-9)
         return super().reason()
 
     def _start(self):
         try:
             from ament_index_python.packages import get_package_prefix
-            for package in ('hw_registration','shaoshao_hw_runtime','nav2_mppi_controller','pointcloud_to_laserscan'):
+            for package in ('hw_registration','shaoshao_hw_runtime','hw_omni_controller','pointcloud_to_laserscan'):
                 get_package_prefix(package)
             if self.mapping.is_running():self.mapping.request_stop()
             deadline=time.monotonic()+60
@@ -110,34 +109,50 @@ class NavigationControl(BaseControl):
 class NavigationBridge(BaseBridge):
     def __init__(self,node,panel,root):
         from std_msgs.msg import String
-        from nav_msgs.msg import OccupancyGrid
+        from geometry_msgs.msg import TwistStamped
         from nav2_msgs.msg import SpeedLimit
         from nav2_msgs.srv import ManageLifecycleNodes
         from std_srvs.srv import Trigger
-        from shaoshao_hw_interfaces.msg import NavCommand
+        from shaoshao_hw_interfaces.msg import NavigationSession
+        from shaoshao_hw_interfaces.msg import ChassisFeedback
         config=load(Path(root)/'shaoshao/web_panel/robot.yaml')
-        self.motion=MotionLimiter(config['navigation']['motion']);self.collision=None
+        self.chassis_gate=FeedbackGate(config['navigation']['mpc']['feedback_timeout_s'])
         self.quality_at=0.;self.hw_status={'ready':False,'state':'acquiring','message':'等待自动全局定位','speed_limit_mps':0.}
         self.auto_resume=None;self.resume_phase=None;self._loss_cancel=False;self.manual_epoch=None
         self.stack_ready=False;self.startup_future=None
         self.motion_info={}
         self.startup_client=node.create_client(ManageLifecycleNodes,'/navigation_lifecycle/manage_nodes')
         self.retry_client=node.create_client(Trigger,'/hw/localization/retry')
-        self.velocity_pub=node.create_publisher(NavCommand,'/hw/nav_command',10)
+        self.session_pub=node.create_publisher(NavigationSession,'/hw/navigation_session',1)
         self.speed_pub=node.create_publisher(SpeedLimit,'/navcar/speed_limit',10)
         super().__init__(node,panel,root)
+        node.destroy_subscription(self.subs[0])
+        self.subs[0]=node.create_subscription(TwistStamped,'/navcar/cmd_vel_auto',self.stamped_command,1)
         node.destroy_subscription(self.subs[1]);del self.subs[1]  # no AMCL authority
         self.subs.extend([node.create_subscription(String,'/hw/localization/status',self.quality,10),
-                         node.create_subscription(OccupancyGrid,'/local_costmap/costmap',self.local_grid,10)])
+                         node.create_subscription(ChassisFeedback,'/hw/chassis_feedback',self.chassis_feedback,10),
+                         node.create_subscription(String,'/hw/command/status',self.command_status,1)])
         self.status_thread=threading.Thread(target=self.poll_controller,daemon=True);self.status_thread.start()
 
     def reset_hw(self):
-        self.motion.stop();self.collision=None;self.quality_at=0.;self.stack_ready=False
+        self.quality_at=0.;self.stack_ready=False
         self.startup_future=None;self.clear_resume()
         self.hw_status={'ready':False,'state':'acquiring','message':'正在自动搜索地图位置','speed_limit_mps':0.}
         self.localization_info=self.hw_status
 
     def clear_resume(self):self.auto_resume=None;self.resume_phase=None
+
+    def chassis_feedback(self,msg):
+        now=self.node.get_clock().now().nanoseconds*1e-9
+        sample=Feedback(msg.header.stamp.sec+msg.header.stamp.nanosec*1e-9,msg.seq,msg.authority_epoch,
+            msg.control_allowed,msg.vx_mps,msg.vy_mps,msg.chassis_omega_radps,msg.gimbal_relative_yaw_rad,msg.header.frame_id)
+        with self.panel.lock:
+            try:changed=self.chassis_gate.update(sample,now)
+            except ValueError:changed=True
+            if changed or not self.chassis_gate.ready(now):
+                self.clear_resume();self.panel.commands.clear()
+                if self.panel.nav_status in ('active','sending'):
+                    self.panel.cancel_navigation()
 
     def retry_localization(self):
         from std_srvs.srv import Trigger
@@ -149,7 +164,7 @@ class NavigationBridge(BaseBridge):
                 self._loss_cancel=True
                 try:p.cancel_navigation()
                 finally:self._loss_cancel=False
-            self.motion.stop();p.nav_localized=False
+            p.commands.clear();p.nav_localized=False
         self.retry_client.call_async(Trigger.Request())
 
     def quality(self,msg):
@@ -166,15 +181,17 @@ class NavigationBridge(BaseBridge):
             self.hw_status=value;self.quality_at=time.monotonic();self.localization_info=value
             self.panel.nav_localized=value['ready']
 
-    def local_grid(self,msg):
-        if msg.header.frame_id!='navcar_odom' or msg.info.width*msg.info.height>1000000:return
-        stamp=sample_monotonic_time(msg.header.stamp,self.node.get_clock().now().nanoseconds,time.monotonic(),.5)
-        if stamp is None:return
-        p,q=msg.info.origin.position,msg.info.origin.orientation
-        origin=(p.x,p.y,math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z)))
-        try:grid=CollisionGrid(np.asarray(msg.data).reshape(msg.info.height,msg.info.width),msg.info.resolution,origin,stamp)
-        except (ValueError,TypeError):return
-        with self.panel.lock:self.collision=grid
+    def stamped_command(self,msg):
+        stamp=sample_monotonic_time(msg.header.stamp,self.node.get_clock().now().nanoseconds,time.monotonic(),.2)
+        if stamp is not None and msg.header.frame_id=='navcar_center':BaseBridge.command(self,msg.twist)
+
+    def command_status(self,msg):
+        try:
+            value=json.loads(msg.data)
+            age=(self.node.get_clock().now().nanoseconds-value['stamp_ns'])*1e-9
+            if not -.05<=age<=.5:return
+        except (ValueError,KeyError,TypeError):return
+        with self.panel.lock:self.motion_info=value
 
     def costmap(self,msg):
         if msg.header.frame_id!='map' or not 0<msg.info.width*msg.info.height<=16000000:return
@@ -203,6 +220,11 @@ class NavigationBridge(BaseBridge):
         msg.twist.covariance=(j@np.asarray(msg.twist.covariance).reshape(6,6)@j.T).reshape(-1).tolist()
         msg.pose.covariance=shift_planar_covariance(list(msg.pose.covariance),yaw,offset)
         msg.child_frame_id=reference['base_frame']
+        # Nav2's stopped-goal checker must see actual chassis translation too.
+        # Keep the lidar's angular rate: chassis spin is an independent channel.
+        feedback=getattr(self,'chassis_gate',None)
+        if feedback and feedback.ready(self.node.get_clock().now().nanoseconds*1e-9):
+            t.linear.x=feedback.sample.vx;t.linear.y=feedback.sample.vy
         with p.lock:
             p.pose={'x':pos.x,'y':pos.y,'z':pos.z,'yaw':yaw,'frame':msg.header.frame_id,'reference_offset_xy_m':offset[:2]}
             p.odom_time=sampled
@@ -235,7 +257,7 @@ class NavigationBridge(BaseBridge):
                 self._loss_cancel=True
                 try:p.cancel_navigation()
                 finally:self._loss_cancel=False
-                self.motion.stop()
+                p.commands.clear()
             if self.auto_resume and p.nav_status not in ('active','sending','canceling') and not p.navigation_reason() and self.hw_status.get('state')=='tracking':
                 goal=self.auto_resume;revision=p.saved_map()[0]['revision']
                 if revision!=goal['revision']:self.clear_resume();return
@@ -256,40 +278,24 @@ class NavigationBridge(BaseBridge):
                     manual_changed=self.manual_epoch is not None and epoch!=self.manual_epoch
                     self.manual_epoch=epoch
                     if manual_changed or (self.lease and state['control_source']!='navigation'):
-                        self.clear_resume();self.panel.cancel_navigation();self.motion.stop();self.lease=None
+                        self.clear_resume();self.panel.cancel_navigation();self.lease=None
             except Exception:
                 self.serial_ready=False
 
     def output(self):
-        from shaoshao_hw_interfaces.msg import NavCommand
-        previous=time.monotonic()
-        while not self.done.wait(.02):
-            p=self.panel;now=time.monotonic();dt=now-previous;previous=now
+        from shaoshao_hw_interfaces.msg import NavigationSession
+        # Task/lease heartbeat only. C++ owns velocity gating and 50 Hz output.
+        while not self.done.wait(.05):
+            p=self.panel
             with p.lock:
-                active=p.nav_status=='active' and p.navigation_control.running and not p.nav_hold and not p.switching
-                stamp,values=p.commands.get('auto',(0.,(0.,0.,0.)))
-                moving=active and not p.navigation_reason() and now-stamp<.2 and now-self.quality_at<1.
-                limit=min(p.navigation_control.max_speed,self.hw_status.get('speed_limit_mps',0.))
-                velocity=self.motion.step(values[:2],dt,limit,emergency=not moving)
-                pose=p.pose
-                safe=(not any(velocity) or (pose and self.collision and self.collision.safe(
-                    (pose['x'],pose['y'],pose['yaw']),velocity,p.navigation_control.frames['robot_radius_m']+.02,
-                    now,min(self.motion.p['acceleration_mps2'],self.motion.p['deceleration_mps2']),
-                    self.motion.p['jerk_mps3'])))
-                if not safe:velocity=self.motion.stop()
-                self.motion_info={'raw_xy':list(values[:2]),'sent_xy':list(velocity),
-                    'moving_allowed':bool(moving),'collision_clear':bool(safe),
-                    'raw_age_s':max(0.,now-stamp),'status_age_s':max(0.,now-self.quality_at),
-                    'grid_age_s':None if self.collision is None else max(0.,now-self.collision.stamp),
-                    'reason':p.navigation_reason() if not moving else ''}
-                if self.lease:
-                    lease=self.lease
-                    self.seq+=1;msg=NavCommand();msg.header.stamp=self.node.get_clock().now().to_msg()
-                    msg.header.frame_id=p.navigation_control.frames['base_frame'];msg.lease=lease;msg.seq=self.seq
-                    msg.twist.linear.x,msg.twist.linear.y=velocity;msg.twist.angular.z=0.
-                    try:self.velocity_pub.publish(msg)
-                    except Exception:
-                        self.motion.stop();p.nav_hold=True;p.nav_message='速度通道异常，已停止输出'
+                if not self.lease:continue
+                msg=NavigationSession();msg.header.stamp=self.node.get_clock().now().to_msg()
+                msg.header.frame_id='navcar_center';msg.lease=self.lease
+                sample=self.chassis_gate.sample
+                msg.authority_epoch=sample.authority_epoch if sample else 0
+                msg.enabled=bool(p.nav_status=='active' and p.navigation_control.running and
+                    not p.nav_hold and not p.switching and not p.navigation_reason())
+                self.session_pub.publish(msg)
 
     def close(self):
         super().close();self.status_thread.join(1)

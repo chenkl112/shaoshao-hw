@@ -797,9 +797,9 @@ def handler_class(panel, token):
 
         def do_GET(self):
             path = urlparse(self.path).path
-            if path == '/':
-                self.reply(200, Path(__file__).with_name('index.html').read_bytes(),
-                           'text/html; charset=utf-8')
+            if path in ('/', '/stream.js'):
+                self.reply(200, Path(__file__).with_name('index.html' if path=='/' else 'stream.js').read_bytes(),
+                           'text/html; charset=utf-8' if path=='/' else 'text/javascript; charset=utf-8')
             elif path in ('/api/state', '/api/cloud', '/api/map', '/api/map/image', '/api/navigation/costmap'):
                 if not self.authorized():
                     return

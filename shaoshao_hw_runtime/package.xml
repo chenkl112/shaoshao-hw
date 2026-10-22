@@ -1,9 +1,10 @@
 <?xml version="1.0"?>
 <package format="3"><name>shaoshao_hw_runtime</name><version>0.1.0</version>
-<description>Indexed global localization and mapping for the Shaoshao mecanum robot.</description>
+<description>Indexed localization, mapping and obstacle prediction for a four-wheel omni robot.</description>
 <maintainer email="maintainer@example.com">shaoshao</maintainer><license>MIT</license>
 <buildtool_depend>ament_cmake</buildtool_depend><buildtool_depend>ament_cmake_python</buildtool_depend>
 <exec_depend>rclpy</exec_depend><exec_depend>sensor_msgs</exec_depend><exec_depend>geometry_msgs</exec_depend>
 <exec_depend>nav_msgs</exec_depend><exec_depend>std_msgs</exec_depend><exec_depend>std_srvs</exec_depend>
 <exec_depend>tf2_ros</exec_depend><exec_depend>shaoshao_hw_interfaces</exec_depend><exec_depend>hw_registration</exec_depend>
+<exec_depend>python3-numpy</exec_depend><exec_depend>python3-scipy</exec_depend><exec_depend>python3-yaml</exec_depend>
 <export><build_type>ament_cmake</build_type></export></package>

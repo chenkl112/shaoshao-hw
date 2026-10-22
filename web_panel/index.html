@@ -34,7 +34,7 @@ canvas{width:100%;height:64vh;min-height:350px;display:block;touch-action:none}.
 <div class="cloud-tools"><label><input id="ceilingFilter" type="checkbox" checked>点云去顶</label><label>高度上限 <input id="ceilingHeight" type="number" step="0.1" value="1.5" aria-label="去顶高度上限，米"> m</label><small id="heightReference">参考：当前点云原点</small><label title="仅过滤保存的静态地图，实时点云仍显示移动障碍物"><input id="dynamicMapFilter" type="checkbox" checked>建图动态过滤</label><button id="applyMappingFilter" disabled>应用到建图</button><small id="mappingFilterStatus" role="status">正在读取建图去顶设置…</small></div>
 <div class="view"><canvas id="cloud"></canvas><div class="hint">拖动旋转 · 滚轮缩放 · 双击回到车的位置</div></div>
 <div class="stats"><span id="frame">坐标系 —</span><span id="count">点数 —</span><span id="fresh">点云 —</span><span id="pose">位置 —</span><span id="yaw">yaw 等待反馈</span></div>
-<p class="note">默认只平移，yaw 电机保持固定关节角。小陀螺默认关闭，仅手动/建图模式可开启；正速度为逆时针，负速度为顺时针，可同时平移。网页失联、切换模式或传感器异常时关闭小陀螺。离开建图模式会保存地图，导航目标在“建图地图”页点选后，通过“前往目标”提交。</p>
+<p class="note">默认待机，可查看实时点云。点击“开始建图”创建地图，结束时点击“停止建图并保存”。进入“导航”并等待定位就绪后，在地图选点预览路线，再点击“前往目标”。小陀螺由独立控制入口操作，手动接管会取消当前导航任务。</p>
 </section>
 <section id="mapView" aria-label="建图地图" hidden>
 <div class="view-heading"><h2>建图地图</h2><small id="mapStatus" role="status">等待读取地图</small><button id="refreshMap">刷新地图</button><button id="fitMap">适应窗口</button></div>
@@ -45,6 +45,7 @@ canvas{width:100%;height:64vh;min-height:350px;display:block;touch-action:none}.
 </section>
 <div id="error" role="alert"></div>
 </main></div>
+<script src="/stream.js"></script>
 <script>
 'use strict';
 const params=new URLSearchParams(location.search);
@@ -58,6 +59,7 @@ let activeView='live';
 let dynamicFilterDraft=null;
 let displayPoints=[],cloudFrame='',ceilingEnabled=true,ceilingHeight=1.5;
 let points=[],sequence=-1,yaw=-.7,pitch=.85,scale=35,center=[0,0,0],robot=null,connected=false,requesting=false,lastState=null,requestError='';
+let renderedCloudKey='';
 try{
  const saved=JSON.parse(sessionStorage.getItem('scurmCloudCeiling')||'null');
  if(saved&&typeof saved.enabled==='boolean'&&Number.isFinite(saved.height)){
@@ -139,25 +141,35 @@ $('spin').onclick=async()=>{
  catch(e){requestError=e.message;$('error').textContent=requestError}
  finally{requesting=false;buttons()}
 };
-async function poll(){
- try{
-  const [s,c]=await Promise.all([api('/api/state'),api('/api/cloud')]);const previousMode=lastState?.mode;connected=true;lastState=s;
+let stream=null;
+function acceptState(s){
+  if(s.transport?.websocket&&!stream&&typeof window.ShaoShaoStream==='function'&&typeof WebSocket==='function')stream=new window.ShaoShaoStream(token,acceptState,acceptCloud,unavailable);
+  const previousMode=lastState?.mode;connected=true;lastState=s;
   if(s.mode==='navigation'&&previousMode!=='navigation')switchView('map');
-  if(s.spin?.enabled&&!requesting)await api('/api/spin/heartbeat',{});
   if(s.spin&&document.activeElement!==$('spinRate')){
    $('spinRate').value=s.spin.rate_rad_s;$('spinRate').max=s.spin.max_rate_rad_s;$('spinRate').min=-s.spin.max_rate_rad_s;
   }
-  $('status').textContent=s.switching?'正在切换并保存地图…':names[s.mode]+' · 节点模式';
-  $('demo').textContent=s.demo?'演示数据 · 未连接车辆':s.mock_hardware?'模拟底盘 · 无电机输出':'';
-  $('yaw').textContent=s.yaw.ready?'yaw 已锁定 · '+(s.yaw.angle_rad*180/Math.PI).toFixed(2)+'°':s.yaw.reason;
+  $('status').textContent=s.switching?'正在切换并保存地图…':s.mapping_only?(s.mode==='navigation'?(s.navigation?.reason||s.navigation?.message||'导航就绪'):s.mapping_control?.message||'待机'):names[s.mode]+' · 节点模式';
+  $('demo').textContent=s.demo?'演示数据 · 未连接车辆':s.mock_hardware?'模拟底盘 · 无电机输出':s.mapping_only?'MID-360 · 建图 / 导航':'';
+  $('yaw').textContent=s.mapping_only?'雷达坐标平移 · 小陀螺独立控制':s.yaw.ready?'yaw 已锁定 · '+(s.yaw.angle_rad*180/Math.PI).toFixed(2)+'°':s.yaw.reason;
   $('error').textContent=s.error||requestError;
   $('fresh').textContent=s.cloud_age===null?'尚无有效点云':s.cloud_age>1?'点云已停止 · '+s.cloud_age+' 秒前':'实时 · '+s.cloud_age+' 秒前';
-  $('frame').textContent='坐标系 '+(c.frame||'—');cloudFrame=c.frame||'';
-  if(c.sequence!==sequence){points=c.points;sequence=c.sequence}
-  robot=s.pose&&s.pose.frame===c.frame?s.pose:null;updateCloudFilter();
+  robot=s.pose&&s.pose.frame===cloudFrame?s.pose:null;updateCloudFilter();
   $('pose').textContent=s.pose?'位置 '+s.pose.x.toFixed(2)+', '+s.pose.y.toFixed(2)+' m · '+(s.odom_age===null||s.odom_age>1?'定位无效或已停止':s.pose.frame):'位置 —';
- }catch(e){connected=false;$('status').textContent='连接断开';$('error').textContent=e.message}
- buttons();navigationControls();drawMap();if(activeView==='map')refreshCostmap();setTimeout(poll,200);
+  buttons();navigationControls();drawMap();if(activeView==='map')refreshCostmap();
+}
+function acceptCloud(c){
+ $('frame').textContent='坐标系 '+(c.frame||'—');cloudFrame=c.frame||'';
+ if(c.sequence!==sequence){points=c.points;sequence=c.sequence}
+ robot=lastState?.pose?.frame===cloudFrame?lastState.pose:null;updateCloudFilter();
+}
+function unavailable(message){connected=false;$('status').textContent='连接断开';$('error').textContent=message;buttons();navigationControls()}
+async function poll(){
+ try{
+  if(!stream?.active){const [s,c]=await Promise.all([api('/api/state'),api('/api/cloud')]);acceptCloud(c);acceptState(s)}
+  if(lastState?.spin?.enabled&&!requesting)await api('/api/spin/heartbeat',{});
+ }catch(e){unavailable(e.message)}
+ setTimeout(poll,stream?.active&&!lastState?.spin?.enabled?500:200);
 }
 function project(x,y,z){
  x-=center[0];y-=center[1];z-=center[2];
@@ -167,6 +179,8 @@ function project(x,y,z){
 function draw(){
  if(activeView!=='live'){requestAnimationFrame(draw);return}
  const dpr=window.devicePixelRatio||1,w=canvas.clientWidth,h=canvas.clientHeight;
+ const key=[sequence,yaw,pitch,scale,...center,robot?.x,robot?.y,robot?.z,robot?.yaw,ceilingEnabled,ceilingHeight,w,h,dpr].join(',');
+ if(key===renderedCloudKey){requestAnimationFrame(draw);return}renderedCloudKey=key;
  if(canvas.width!==Math.round(w*dpr)||canvas.height!==Math.round(h*dpr)){canvas.width=Math.round(w*dpr);canvas.height=Math.round(h*dpr)}
  ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,w,h);ctx.strokeStyle='#363c32';ctx.lineWidth=1;
  const gx=Math.round(center[0]),gy=Math.round(center[1]);

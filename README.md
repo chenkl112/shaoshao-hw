@@ -1,6 +1,6 @@
 # 哨哨 HW
 
-面向 i7-12800HX、麦轮底盘和顶置 MID360 的独立导航工程。沿用哨哨网页的点云、地图、选点，以及 **建图 / 导航 / 待机** 三个模式；定位改为 FAST-LIO + small_gicp，局部控制改为 Nav2 MPPI Omni。
+面向四轮全向底盘和顶置 MID360 的独立导航工程。保留 FAST-LIO + small_gicp、网页选点和 Nav2 全局规划；局部控制使用 HW FDDP 求解器与整车 XY 速度响应模型；动态障碍检测/跟踪/预测、底盘反馈门控和 50 Hz 速度转发使用 C++。实现边界与电控接口见 [HW 全向导航方案](deployment/HW全向导航方案.md)。
 
 从 [shaoshao](https://github.com/chenkl112/shaoshao) 的 `debd22c1089ef2421fdb5667d0f08007d4aa9e7c` 独立建立，参考 [HWSentryNav26](https://github.com/Polyacetone/HWSentryNav26) 的配准质量评估思路。原仓库保持独立。上车步骤见 [部署说明](deployment/README.md)，串口格式见 [Navcar 接入](web_panel/Navcar接入.md)。
 
@@ -12,8 +12,13 @@
 - 只有通过质量与跳变检查的校正才平滑写入 `map → navcar_odom`。拒绝一次校正不会抹掉已有定位，也不会刷新有效校正时间。
 - 短暂退化只在近场余量充足时以至多 **0.05 m/s** 衔接，最长有效校正年龄 **2 s**、累计距离 **5 cm**。窄处、扫描/里程计超时直接停车。
 - 定位丢失后保留原目标，停车、全局定位、重新规划，再继续。取消、手动接管、切换模式和地图变化会阻止自动续行。
-- MPPI 20 Hz 规划全向平移，合速度上限 **0.5 m/s**；50 Hz 输出限制加速度 **0.3 m/s²**、jerk **1 m/s³**。紧急停车优先。导航角速度始终为零。
-- 原 Navcar UART1 V1 协议保持不变。ROS 速度经有效期、控制租约和序号校验后发送到串口；ACK 和目标回显不作为实测姿态/速度。
+- HW FDDP 20 Hz 预测未来 2 s 的全向运动，目标合速度上限 **0.5 m/s**、加速度 **0.3 m/s²**、jerk **1 m/s³**；50 Hz 转发目标。平移与小陀螺分通道，四轮分配由电控完成。
+- 点云与静态地图差分，聚类、匈牙利关联和卡尔曼跟踪，发布带形状的 3 s 障碍预测；MPC 按采样时间对齐并验收未来碰撞。
+- 新串口字节协议暂未确定，已预留实际 XY 速度、底盘角速度、云台相对角、控制权和采样时间接口。没有新实测反馈就保持停车。旧 V1 编解码仅保留兼容，ACK/目标回显不作为测量。
+
+## 网页
+
+原生 HTML/CSS/JavaScript 前端 + C++ Drogon HTTP/WebSocket 服务。状态推送与 float32 二进制点云由 C++ 提供，Python 任务服务仅使用私有 Unix socket。现有页面和操作入口保留，见 [网页架构](deployment/网页架构.md)。
 
 ## 实车配置
 
@@ -29,9 +34,9 @@
 | 导航参考点 | 车体中心的 yaw 轴；方向随雷达 |
 | 全局 / 局部栅格 | 0.025 m |
 | 导航合速度上限 | 0.5 m/s，按路况变化 |
-| 串口 / 倍率 | 2,000,000 baud；前后和左右 × 10 |
+| 旧串口 / 倍率 | 2,000,000 baud；前后和左右 × 10；新接口使用 SI 单位 |
 
-由于没有实测底盘 yaw，本版以覆盖任意底盘朝向的外接圆检查碰撞。含余量的直径约 **635.3 mm**。650 mm 通道只有约 **7.3 mm/侧** 的剩余几何空间，2.5 cm 栅格离散、地图和控制误差仍可能使其不可通行，不能保证通过。
+本版继续使用覆盖任意底盘朝向的外接圆检查碰撞。含余量的直径约 **635.3 mm**。650 mm 通道只有约 **7.3 mm/侧** 的剩余几何空间，2.5 cm 栅格离散、地图和控制误差仍可能使其不可通行，不能保证通过。
 
 栅格分辨率、GICP 的 5 cm 体素和 FAST-LIO 的 15 cm 实时匹配滤波分别服务于不同步骤；细栅格不会恢复未观测的点。
 
@@ -53,15 +58,21 @@ bash ~/ccc/shaoshao-hw-runtime/start_mapping.sh --idle
 
 ## 验证与代码入口
 
-Jazzy 下已完成六个 ROS 包编译和隔离合成数据联调。方法和边界见 [验证说明](validation/README.md)。没有连接真实雷达或底盘，实车定位阈值、横向倍率、刹车距离和窄道通过能力仍需上车测量。
+本次完成原生 C++ 求解器/整车模型测试和 Python 回归。当前开发环境没有 ROS；新增插件与消息尚需 Jazzy 编译及隔离联调。原版 MPPI 的历史联调结果不能作为新链路的验收证据。方法见 [验证说明](validation/README.md)。尚未连接真实雷达或底盘，模型参数和新串口接口待实测。
 
 | 入口 | 用途 |
 |---|---|
 | `shaoshao_hw/localizer_node.py`、`policy.py` | 全局检索、配准调度与定位状态 |
-| `hw_registration/` | small_gicp 服务、MPPI 合速度约束插件 |
+| `hw_registration/` | small_gicp 服务；历史 MPPI 插件保留兼容 |
+| `hw_omni_controller/` | HW FDDP、XY 整车模型、按时间预测碰撞的 Nav2 控制器 |
+| `hw_omni_controller/src/obstacle_predictor.cpp`、`include/hw_omni_controller/obstacles.hpp` | C++ 动态障碍检测、跟踪与预测 |
+| `hw_omni_controller/src/command_relay.cpp`、`include/hw_omni_controller/relay.hpp` | C++ 反馈/租约/碰撞门控与 50 Hz 输出 |
+| `shaoshao_hw/chassis.py`、`shaoshao_hw_interfaces/msg/` | 网页反馈状态与预留电控接口，执行门控在 C++ |
 | `shaoshao_hw/index.py`、`recorder_node.py` | 关键帧与静态索引 |
-| `web_panel/navcar_navigation.py` | MPPI 参数、自动恢复、速度输出与碰撞保护 |
+| `web_panel/navcar_navigation.py` | 参数生成、任务恢复、租约心跳和网页状态 |
 | `shaoshao_hw/motion.py` | 速度/加速度/jerk 限制、刹停范围检查 |
+| `shaoshao_web/`、`web_panel/stream.js` | C++ 网页服务与 JavaScript WebSocket/二进制点云客户端 |
+| `web_panel/supervisor_rpc.py` | 私有本地任务接口 |
 | `deployment/` | 独立构建、建图、保存和启动脚本 |
 
 历史通用桥接和 AMCL/DWB 辅助代码保留用于兼容回归，新入口不启动 AMCL 或 DWB。提交改动前运行两套 unittest；修改 ROS/C++ 链路还应运行隔离联调。来源与许可证见 [THIRD_PARTY.md](THIRD_PARTY.md)。

@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>shaoshao_web</name><version>0.1.0</version>
+  <description>C++ HTTP/WebSocket service for the JavaScript robot panel.</description>
+  <maintainer email="maintainer@example.com">shaoshao</maintainer><license>MIT</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend><depend>sensor_msgs</depend><depend>std_msgs</depend><depend>livox_ros_driver2</depend>
+  <depend>hw_omni_controller</depend><depend>eigen</depend><depend>libdrogon-dev</depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

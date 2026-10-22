@@ -1,6 +1,6 @@
 # 哨哨 HW 上车部署
 
-适用 Ubuntu 24.04 / ROS 2 Jazzy、MID360、Navcar UART1 V1。源码放在 `~/ccc/shaoshao-hw`，运行文件放在 `~/ccc/shaoshao-hw-runtime`，地图放在 `~/scurm_maps/shaoshao-hw`。不覆盖旧工程的源码、配置或地图。
+适用 Ubuntu 24.04 / ROS 2 Jazzy、MID360、四轮全向底盘。新电控协议未定，当前先预留 ROS 接口，详见 [HW 全向导航方案](HW全向导航方案.md)。旧 Navcar UART1 V1 仅保留兼容，不能提供新控制器需要的实测反馈。源码放在 `~/ccc/shaoshao-hw`，运行文件放在 `~/ccc/shaoshao-hw-runtime`，地图放在 `~/scurm_maps/shaoshao-hw`。不覆盖旧工程的源码、配置或地图。
 
 ## 安装与构建
 
@@ -11,6 +11,8 @@ sudo apt update
 sudo apt install build-essential cmake git python3-dev python3-colcon-common-extensions \
   python3-numpy python3-scipy python3-pil python3-yaml python3-serial \
   libeigen3-dev libpcl-dev libapr1-dev libcurl4-openssl-dev \
+  libdrogon-dev libjsoncpp-dev libtrantor-dev uuid-dev zlib1g-dev libbrotli-dev \
+  libhiredis-dev libpq-dev libmariadb-dev libsqlite3-dev libyaml-cpp-dev \
   ros-jazzy-navigation2 ros-jazzy-nav2-bringup ros-jazzy-nav2-mppi-controller \
   ros-jazzy-pointcloud-to-laserscan ros-jazzy-pcl-ros ros-jazzy-pcl-conversions \
   ros-jazzy-ament-cmake-auto ros-jazzy-tf2-geometry-msgs
@@ -19,7 +21,7 @@ cd ~/ccc/shaoshao-hw
 bash deployment/bootstrap.sh
 ```
 
-构建脚本拉取固定版本 small_gicp 和 Livox-SDK2，先安装 SDK，再构建六个 ROS 包。最多使用两个编译任务。首次构建可能需要较长时间与 sudo；依赖版本不匹配会报错。运行目录的 `shaoshao` 是指向本源码的兼容软链接。
+构建脚本拉取固定版本 small_gicp 和 Livox-SDK2，先安装 SDK，再构建八个 ROS 包。最多使用两个编译任务。首次构建可能需要较长时间与 sudo；依赖版本不匹配会报错。运行目录的 `shaoshao` 是指向本源码的兼容软链接。
 
 默认运行路径可通过 `export SHAOSHAO_HW_RUNTIME=/绝对路径` 修改；构建和每个运行终端必须使用相同设置。重复构建保留已生成的串口和雷达网络配置。
 
@@ -31,7 +33,7 @@ bash deployment/bootstrap.sh
 4. 用 `ls -l /dev/serial/by-id/` 确认串口。必要时 `sudo usermod -aG dialout "$USER"` 后重新登录。
 5. 确认下位机使用 2,000,000 baud，并对失去指令做停车处理；原平移指令倍率为 10。横移、制动和 yaw 保持效果需实测。
 
-本版不要求新增 MCU 实测轮速或 yaw 反馈。雷达在云台上，导航依据真实雷达/IMU位姿和中心偏移。下位机必须按现有 Navcar 约定保持云台目标世界航向、在云台坐标下执行平移。
+本版需要 `/hw/chassis_feedback` 的真实 XY 速度、底盘角速度、云台相对角与硬件控制权。新串口适配器待协议确定后实现；没有反馈时导航保持停车。上位机发 SI 单位整车目标，电控完成坐标转换、四轮分配和电机闭环。小陀螺使用独立通道，原 V1 目标回显不能代替实测。
 
 ## 启动、建图与导航
 
@@ -44,7 +46,7 @@ bash ~/ccc/shaoshao-hw-runtime/start_move_web.sh
 bash ~/ccc/shaoshao-hw-runtime/start_mapping.sh --idle
 ```
 
-访问 `http://车载电脑IP:8080/?token=终端输出的token`；8081 为手动控制。主网页沿用现有哨哨外观。
+访问 `http://车载电脑IP:8080/?token=终端输出的token`；8081 为手动控制。主网页沿用现有哨哨外观，由 JavaScript 前端和 C++ Drogon 服务提供；内部 Python 仅保留任务监管。详见 [网页架构](网页架构.md)。
 
 1. 点击“建图”，用 8081 或已有遥控方式缓慢走遍场地，覆盖通道入口和两侧墙。开始时静止等待 IMU 初始化，保证点云稳定。
 2. 点击“待机”或切换“导航”。程序先通过 `/map_save` 保存静态 PCD，再调用 `/hw/finalize_index` 生成配套索引，然后退出建图。任一步失败会显示错误并保留建图进程。
@@ -66,7 +68,9 @@ bash ~/ccc/shaoshao-hw-runtime/start_mapping.sh --idle
 | 加减速度、jerk | 可在同上 `navigation.motion` 覆盖，默认 0.3 / 0.3 / 1.0 |
 | 串口与实测倍率 | 运行目录 `config/serial.navcar.yaml` |
 | 雷达网络 | 运行目录 `config/MID360_config.json` |
-| MPPI、代价地图、碰撞余量 | `web_panel/navcar_navigation.py` |
+| FDDP 整车响应参数 | `web_panel/robot.yaml` → `navigation.mpc`；0.30 s 为初始假设，待辨识 |
+| 动态障碍跟踪 | 同上 `navigation.obstacles`，默认值见 `shaoshao_hw/config.py` |
+| 代价地图、碰撞余量 | `web_panel/navcar_navigation.py` |
 
 不要直接修改生成的 `navigation_runtime/nav2.yaml`，下次切换导航会重新生成。改源码参数后退出导航并重新进入；修改 C++ 后重新运行 bootstrap 并重启相关服务。
 
@@ -74,7 +78,7 @@ bash ~/ccc/shaoshao-hw-runtime/start_mapping.sh --idle
 
 有效校正时间以扫描采集时刻计算，拒绝或重放旧结果不会续期。1.6 s 内为正常校正时间窗，超过后只允许有足够近场余量时低速衔接；2 s 后停车并重定位。每 30 s 搜索未成功时等待 5 s 重试。无歧义检查只针对检索到并通过配准的候选，高度对称环境可能无法自动区分。
 
-MPPI 预测 2 s、批量 1000、控制 20 Hz；输出 50 Hz。`wz_max=0`，`wz_std=1e-6` 仅避免内部零方差除法，实际输出角速度强制为零。碰撞模型覆盖任意底盘朝向。局部地图完整新帧用于刹停检查，未知区域按不可通行处理。
+FDDP 预测 2 s、控制 20 Hz，独立 C++ 节点输出目标 50 Hz；网页只发布任务和租约心跳。局部代价地图使用 map 系，动态障碍预测覆盖 3 s，并按原始观测时间对齐。平移通道不控制小陀螺。碰撞模型继续覆盖任意底盘朝向，未知区域不可通行。独立的二次速度平滑已移除，避免改变 MPC 预测的目标响应。
 
 ## 检查与回退
 
@@ -90,4 +94,4 @@ ros2 topic hz /hw/nav_command
 
 回旧版时，在新网页取消导航、进入待机，8081停止，再退出新网页/串口进程，按旧版原入口启动。不要同时启动两套控制服务。旧地图与参数无需替换。
 
-当前完成软件编译与合成数据联调，尚未连接真实 MID360/底盘。首次上车需验证速度换算、失联停车、人工接管、定位误差，再逐步增加速度与测试通道。650 mm 通道对当前外接圆模型余量很小，不承诺可通行。
+本次原生 C++ 与 Python 测试可执行；新增 ROS 插件和消息仍需 Jazzy 编译联调，尚未连接真实 MID360/底盘。首次上车需验证速度换算、失联停车、人工接管、定位误差，再逐步增加速度与测试通道。650 mm 通道对当前外接圆模型余量很小，不承诺可通行。

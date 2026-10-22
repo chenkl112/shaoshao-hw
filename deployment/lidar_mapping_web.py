@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""Live, lidar-only mapping panel. No motor-command publishers."""
-import argparse,json,math,os,re,secrets,signal,struct,sys,threading,time,zlib
+"""Private ROS/task supervisor and launcher for the C++ web service."""
+import argparse,json,math,os,secrets,signal,struct,subprocess,sys,threading,time,zlib
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import urlparse
-from http.server import ThreadingHTTPServer
 
 
 def encode_grid(msg):
@@ -31,9 +29,8 @@ def grid_metadata(msg,filename):
 def main():
     import rclpy
     from rclpy.executors import ExternalShutdownException
-    from rclpy.qos import qos_profile_sensor_data,QoSProfile,DurabilityPolicy,ReliabilityPolicy
-    from sensor_msgs.msg import PointCloud2
-    from livox_ros_driver2.msg import CustomMsg
+    from rclpy.qos import QoSProfile,DurabilityPolicy,ReliabilityPolicy
+    from std_msgs.msg import String
     from nav_msgs.msg import Odometry,OccupancyGrid
     from std_srvs.srv import Trigger
     import yaml
@@ -41,9 +38,11 @@ def main():
     p.add_argument('--bind',default='0.0.0.0');p.add_argument('--port',type=int,default=8080)
     p.add_argument('--maps-dir',type=Path,required=True);a=p.parse_args()
     root=Path(__file__).resolve().parent
+    binary=root/'mapping_install/shaoshao_web/lib/shaoshao_web/shaoshao_web'
+    if not binary.is_file():raise RuntimeError('C++ web service is missing; rebuild with deployment/bootstrap.sh')
     sys.path.insert(0,str(root/'shaoshao/web_panel'))
     import server as upstream
-    from navcar_settings import load_navigation_speed
+    from supervisor_rpc import SupervisorRPC,dispatch
     from lidar_mapping_control import MappingControl,LidarMappingPanelMixin
     control=MappingControl(root,a.maps_dir)
     class Panel(LidarMappingPanelMixin,upstream.Panel):
@@ -77,31 +76,19 @@ def main():
         with panel.lock:
             panel.pose={'x':pos.x,'y':pos.y,'z':pos.z,'yaw':math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z)),'frame':msg.header.frame_id}
             panel.odom_time=time.monotonic()
-    last_cloud=0.
-    def cloud_cb(msg):
-        nonlocal last_cloud
-        if not control.is_running() and not navigation_running():return
-        now=time.monotonic()
-        if now-last_cloud<.2:return
-        last_cloud=now
-        points=upstream.decode_cloud(msg,6000)
+    def cloud_status(msg):
+        try:
+            data=json.loads(msg.data);stamp=data['stamp_ns']
+            age=(node.get_clock().now().nanoseconds-stamp)*1e-9
+            count=data['count']
+            if type(stamp) is not int or not -.05<=age<=.5 or type(count) is not int or not 0<=count<=6000:return
+            if data['source'] not in ('mid360_raw','mid360_registered') or not isinstance(data['frame'],str):return
+        except (ValueError,KeyError,TypeError):return
         with panel.lock:
-            panel.cloud={'points':points,'frame':msg.header.frame_id,'sequence':panel.cloud['sequence']+1,'source':'mid360_registered'}
-            panel.cloud_time=now if points else 0.
-    last_raw=0.
-    def raw_cb(msg):
-        nonlocal last_raw
-        if control.is_running() or navigation_running():return
-        now=time.monotonic()
-        if now-last_raw<.2:return
-        last_raw=now
-        step=max(1,math.ceil(len(msg.points)/6000))
-        points=[[float(p.x),float(p.y),float(p.z)] for p in msg.points[::step]
-                if all(math.isfinite(v) for v in (p.x,p.y,p.z))]
-        with panel.lock:
-            panel.pose=None;panel.odom_time=0.
-            panel.cloud={'points':points,'frame':msg.header.frame_id,'sequence':panel.cloud['sequence']+1,'source':'mid360_raw'}
-            panel.cloud_time=now if points else 0.
+            panel.cloud={'points':[],'count':count,'frame':data['frame'],
+                         'sequence':panel.cloud['sequence']+1,'source':data['source']}
+            panel.cloud_time=time.monotonic()-max(0.,age) if count else 0.
+            if data['source']=='mid360_raw':panel.pose=None;panel.odom_time=0.
     def grid_cb(msg):
         if not control.is_running():return
         try:
@@ -115,8 +102,7 @@ def main():
             tmp=maps_dir/'site.yaml.tmp';tmp.write_text(yaml.safe_dump(metadata,sort_keys=False));tmp.replace(maps_dir/'site.yaml')
             for old in sorted(maps_dir.glob('live-grid-*.png'))[:-8]:old.unlink(missing_ok=True)
         except Exception as e:node.get_logger().error('Cannot write live map: '+str(e))
-    sub=node.create_subscription(PointCloud2,'/cloud_registered',cloud_cb,qos_profile_sensor_data)
-    raw_sub=node.create_subscription(CustomMsg,'/livox/lidar',raw_cb,qos_profile_sensor_data)
+    sub=node.create_subscription(String,'/hw/web/cloud_status',cloud_status,10)
     odom=node.create_subscription(Odometry,'/state_estimation',odom_cb,10)
     map_sub=node.create_subscription(OccupancyGrid,'/projected_map',grid_cb,QoSProfile(depth=1,durability=DurabilityPolicy.TRANSIENT_LOCAL,reliability=ReliabilityPolicy.RELIABLE))
     save_client=node.create_client(Trigger,'/map_save');save_future=None
@@ -128,28 +114,30 @@ def main():
         if panel.cloud_time and time.monotonic()-panel.cloud_time<2 and save_client.service_is_ready():
             save_future=save_client.call_async(Trigger.Request())
     timer=node.create_timer(10.,save_tick)
-    html=(root/'shaoshao/web_panel/index.html').read_text(encoding='utf-8')
-    html=html.replace('b.disabled=!connected','b.disabled=!!lastState?.preview||!connected')
-    replacements={"  $('status').textContent=":"  $('status').textContent='真实雷达 · '+(s.mode==='navigation'?(s.navigation?.reason||s.navigation?.message||'导航就绪'):s.mapping_control?.message||'待机');","  $('demo').textContent=":"  $('demo').textContent='MID-360 · 建图 / 导航';","  $('yaw').textContent=":"  $('yaw').textContent='雷达坐标平移 · 小陀螺关闭';"}
-    html='\n'.join(next((value for prefix,value in replacements.items() if line.startswith(prefix)),line) for line in html.splitlines())
-    navigation_speed=load_navigation_speed(root/'shaoshao/web_panel/robot.yaml')
-    html=re.sub(r'<p class="note">.*?</p>',f'<p class="note">默认待机，只看实时点云。点击“开始建图”创建地图，结束时点击“停止建图并保存”。点击“导航”启动已保存地图的定位，等待定位就绪后在地图空白区域选点并点击“前往目标”。导航仅平移，配置移速上限 {navigation_speed:.2f} m/s，小陀螺关闭；8081 手动控制可接管并取消导航。</p>',html)
-    page=html.encode();token=os.getenv('SCURM_WEB_TOKEN') or secrets.token_urlsafe(24)
-    class Handler(upstream.handler_class(panel,token)):
-        def do_GET(self):
-            if urlparse(self.path).path=='/':self.reply(200,page,'text/html; charset=utf-8')
-            else:super().do_GET()
+    token=os.getenv('SCURM_WEB_TOKEN') or secrets.token_urlsafe(24)
+    rpc=SupervisorRPC(root/'web-supervisor.sock',lambda request:dispatch(panel,request))
     def spin_ros():
         try:rclpy.spin(node)
         except ExternalShutdownException:pass
     spin=threading.Thread(target=spin_ros,daemon=True);spin.start()
-    http=ThreadingHTTPServer((a.bind,a.port),Handler);http.daemon_threads=True
-    print(f'MID360 MAPPING: http://{a.bind}:{a.port}/?token={token}',flush=True)
-    print('Map directory:',a.maps_dir,flush=True)
+    web=None
     def stop(*_):raise KeyboardInterrupt
     signal.signal(signal.SIGINT,stop);signal.signal(signal.SIGTERM,stop)
-    try:http.serve_forever(poll_interval=.2)
+    try:
+        web=subprocess.Popen([str(binary),'--socket',str(rpc.path),'--assets',str(root/'shaoshao/web_panel'),
+            '--maps-root',str(a.maps_dir.resolve().parent),'--bind',a.bind,'--port',str(a.port)],
+            env={**os.environ,'SCURM_WEB_TOKEN':token})
+        print(f'MID360 MAPPING: http://{a.bind}:{a.port}/?token={token}',flush=True)
+        print('Map directory:',a.maps_dir,flush=True)
+        while web.poll() is None:time.sleep(.2)
+        raise RuntimeError('C++ web service exited; inspect web.log')
     except KeyboardInterrupt:pass
     finally:
-        http.server_close();panel.close();rclpy.shutdown();spin.join(timeout=3);node.destroy_node()
+        if web is not None and web.poll() is None:
+            web.terminate()
+            try:web.wait(timeout=5)
+            except subprocess.TimeoutExpired:web.kill();web.wait(timeout=2)
+        rpc.close();panel.close()
+        if rclpy.ok():rclpy.shutdown()
+        spin.join(timeout=3);node.destroy_node()
 if __name__=='__main__':main()
