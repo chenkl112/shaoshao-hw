@@ -11,6 +11,20 @@ set -u
 cd "$source_root"
 python3 -m unittest discover -s tests -v
 python3 -m unittest discover -s web_panel -p 'test*.py' -q
+g++ -O2 -std=c++20 -I /usr/include/eigen3 \
+  -I hw_omni_controller/include -I hw_omni_controller/vendor \
+  hw_omni_controller/test/test_mpc.cpp -o "$SHAOSHAO_HW_RUNTIME/mpc_test"
+"$SHAOSHAO_HW_RUNTIME/mpc_test"
+g++ -O2 -std=c++20 -I /usr/include/eigen3 -I hw_omni_controller/include \
+  hw_omni_controller/test/test_runtime.cpp -o "$SHAOSHAO_HW_RUNTIME/runtime_test"
+"$SHAOSHAO_HW_RUNTIME/runtime_test"
+cmake -S shaoshao_web -B "$SHAOSHAO_HW_RUNTIME/web_native_check" \
+  -DSHAOSHAO_WEB_ROS=OFF -DCMAKE_BUILD_TYPE=Release
+cmake --build "$SHAOSHAO_HW_RUNTIME/web_native_check" -j2
+python3 validation/web_integration.py "$SHAOSHAO_HW_RUNTIME/web_native_check/shaoshao_web"
+node web_panel/validation/mobile_mapping_ui.cjs
+node web_panel/validation/lidar_mapping_ui.cjs
+node web_panel/validation/stream_ui.cjs
 g++ -std=c++17 -I FAST_LIO/include FAST_LIO/test/test_static_map_filter.cpp -o "$SHAOSHAO_HW_RUNTIME/static_filter_test"
 "$SHAOSHAO_HW_RUNTIME/static_filter_test"
 g++ -std=c++17 -I FAST_LIO/include FAST_LIO/test/test_map_ceiling_filter.cpp -o "$SHAOSHAO_HW_RUNTIME/ceiling_filter_test"

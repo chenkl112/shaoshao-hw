@@ -142,10 +142,10 @@ class ReferenceTests(unittest.TestCase):
             self.assertAlmostEqual(scan['min_height'],-.227)
             self.assertEqual(params['bt_navigator']['ros__parameters']['robot_base_frame'],'navcar_center')
             controller=params['controller_server']['ros__parameters']['FollowPath']
-            self.assertEqual(controller['vx_max'],load_navigation_speed(path))
-            self.assertEqual(controller['vx_max'],.5)
-            self.assertEqual(controller['wz_max'],0.)
-            self.assertIn('CostCritic',controller['critics'])
+            self.assertEqual(controller['max_speed_mps'],load_navigation_speed(path))
+            self.assertEqual(controller['max_speed_mps'],.5)
+            self.assertEqual(controller['plugin'],'hw_omni_controller::Controller')
+            self.assertEqual(controller['collision_radius_m'],.297658+.02)
             self.assertNotIn('&id',(output/'nav2.yaml').read_text(encoding='utf-8'))
 
     def test_global_speed_reaches_uart_once_and_localization_gate_is_tight(self):

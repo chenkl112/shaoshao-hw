@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Isolated ROS/GICP/MPPI/Web/native-UART test with an explicitly synthetic plant."""
+"""Isolated GICP/FDDP/prediction/Web test with explicit synthetic measured feedback."""
 import json
 import math
 import os
@@ -74,10 +74,11 @@ def main():
     from rclpy.node import Node
     from rclpy.qos import qos_profile_sensor_data
     from nav_msgs.msg import Odometry,OccupancyGrid
-    from geometry_msgs.msg import Twist
+    from geometry_msgs.msg import TwistStamped
     from sensor_msgs.msg import PointCloud2
     from geometry_msgs.msg import TransformStamped
     from tf2_ros import TransformBroadcaster
+    from shaoshao_hw_interfaces.msg import ChassisFeedback
     import yaml
     runtime=Path(os.environ['SHAOSHAO_HW_RUNTIME']);maps=runtime/'synthetic_map'
     points=make_bundle(maps)
@@ -99,12 +100,23 @@ def main():
             self.cloud=self.create_publisher(PointCloud2,'/cloud_registered',qos_profile_sensor_data)
             self.body=self.create_publisher(PointCloud2,'/cloud_registered_body',qos_profile_sensor_data)
             self.odom=self.create_publisher(Odometry,'/navcar/state_estimation',10)
+            self.feedback=self.create_publisher(ChassisFeedback,'/hw/chassis_feedback',10)
+            self.feedback_seq=0;self.authority_epoch=1;self.control_allowed=True
             self.tf=TransformBroadcaster(self);self.enabled=True
             self.last_grid=None;self.raw_commands=[]
             self.create_subscription(OccupancyGrid,'/local_costmap/costmap',self.grid,10)
-            self.create_subscription(Twist,'/navcar/cmd_vel_auto',lambda m:self.raw_commands.append([m.linear.x,m.linear.y,m.angular.z]),10)
+            self.create_subscription(TwistStamped,'/navcar/cmd_vel_auto',lambda m:self.raw_commands.append([m.twist.linear.x,m.twist.linear.y,m.twist.angular.z]),10)
             self.create_timer(.1,self.tick)
+            # Independent of LIO availability: localization loss should retain
+            # the goal, while actual hardware/manual takeover should revoke it.
+            self.create_timer(.02,self.actual_feedback)
         def grid(self,msg):self.last_grid=msg
+        def actual_feedback(self):
+            with mcu.lock:velocity=mcu.velocity.copy()
+            msg=ChassisFeedback();msg.header.frame_id='navcar_center';msg.header.stamp=self.get_clock().now().to_msg()
+            self.feedback_seq+=1;msg.seq=self.feedback_seq;msg.authority_epoch=self.authority_epoch
+            msg.control_allowed=self.control_allowed;msg.vx_mps=float(velocity[0]);msg.vy_mps=float(velocity[1])
+            self.feedback.publish(msg)
         def tick(self):
             if not self.enabled:return
             with mcu.lock:xy=mcu.position.copy();velocity=mcu.velocity.copy()
@@ -147,7 +159,7 @@ def main():
         api(8080,'/api/navigation/plan',target)
         wait_for(lambda:api(8080,'/api/state')['navigation']['plan']['status']=='ready',10,'Path preview')
         api(8080,'/api/navigation/goal',target)
-        wait_for(lambda:any(math.hypot(x,y)>.02 for _,x,y,*_ in mcu.commands),20,'MPPI -> leased ROS -> native UART motion')
+        wait_for(lambda:any(math.hypot(x,y)>.02 for _,x,y,*_ in mcu.commands),20,'FDDP -> leased ROS -> synthetic native UART motion')
         time.sleep(2)
         sensors.enabled=False;failure_at=time.monotonic()
         wait_for(lambda:api(8080,'/api/state')['navigation'].get('auto_resume_pending'),8,'Lost localization retains goal')
@@ -161,6 +173,7 @@ def main():
         sensors.enabled=False
         wait_for(lambda:api(8080,'/api/state')['navigation'].get('auto_resume_pending'),8,'Second loss retains target')
         epoch=api(8081,'/api/state')['manual_epoch']
+        sensors.authority_epoch+=1;sensors.control_allowed=False
         api(8081,'/api/command',dict(action='stop',strength=.1,speed_unit='m/s',client='integration-manual',seq=1))
         wait_for(lambda:api(8081,'/api/state')['manual_epoch']>epoch,5,'Manual takeover')
         time.sleep(.5)
@@ -174,7 +187,7 @@ def main():
         assert max(math.hypot(c[1],c[2]) for c in mcu.commands)<=.50001
         result={'global_pose_error_m':float(np.linalg.norm([recovered['x']-expected[0],recovered['y']-expected[1]])),
                 'native_commands':len(mcu.commands),'max_command_speed_mps':max(math.hypot(c[1],c[2]) for c in mcu.commands),
-                'checks':['automatic unknown-pose GICP','MPPI activation','Web preview/goal','native CRC/ACK transport',
+                'checks':['automatic unknown-pose GICP','FDDP activation','time-indexed predictions','synthetic measured feedback','Web preview/goal','native CRC/ACK transport',
                           'localization loss stops','automatic replan/resume','manual takeover revokes lease']}
         (runtime/'integration-result.json').write_text(json.dumps(result,indent=2))
         print(json.dumps(result),flush=True)

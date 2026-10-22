@@ -133,7 +133,7 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):receive_ros_command(controller,msg,10_000_000_000)
         self.assertEqual(controller.desired(),(0,-2.,0.,17))
 
-    def test_mppi_configuration_has_no_heading_or_forward_only_constraints(self):
+    def test_fddp_configuration_uses_whole_vehicle_feedback_and_map_predictions(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);web=root/'shaoshao/web_panel';web.mkdir(parents=True)
             (web/'robot.yaml').write_bytes((ROOT/'web_panel/robot.yaml').read_bytes())
@@ -146,9 +146,16 @@ class CoreTests(unittest.TestCase):
             config=yaml.safe_load((output/'nav2.yaml').read_text())
             self.assertNotIn('amcl',config)
             ctrl=config['controller_server']['ros__parameters']['FollowPath']
-            self.assertEqual(ctrl['motion_model'],'Omni');self.assertEqual(ctrl['wz_max'],0)
-            self.assertIn('ShaoShaoNormCritic',ctrl['critics'])
-            self.assertNotIn('PreferForwardCritic',ctrl['critics']);self.assertNotIn('GoalAngleCritic',ctrl['critics'])
-            self.assertEqual(config['local_costmap']['local_costmap']['ros__parameters']['width'],3)
+            self.assertEqual(ctrl['plugin'],'hw_omni_controller::Controller')
+            self.assertEqual(ctrl['max_speed_mps'],.5)
+            self.assertEqual(ctrl['feedback_timeout_s'],.15)
+            self.assertTrue(config['controller_server']['ros__parameters']['enable_stamped_cmd_vel'])
+            self.assertEqual(config['hw_obstacle_predictor']['ros__parameters']['range_m'],8.)
+            self.assertEqual(config['hw_command_relay']['ros__parameters']['max_speed_mps'],.5)
+            local=config['local_costmap']['local_costmap']['ros__parameters']
+            self.assertEqual(local['width'],4)
+            self.assertEqual(local['global_frame'],'map')
+            self.assertEqual(config['controller_server']['ros__parameters']['goal_checker']['plugin'],
+                             'nav2_controller::StoppedGoalChecker')
 
 if __name__=='__main__':unittest.main()

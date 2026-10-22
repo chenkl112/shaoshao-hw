@@ -1,0 +1,5 @@
+<library path="hw_omni_controller">
+  <class name="hw_omni_controller::Controller" type="hw_omni::Controller" base_class_type="nav2_core::Controller">
+    <description>HW FDDP with measured omnidirectional velocity and time-indexed obstacle predictions.</description>
+  </class>
+</library>

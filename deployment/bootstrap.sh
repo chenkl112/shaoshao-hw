@@ -34,7 +34,7 @@ set -u
 cd "$source_root"
 colcon --log-base "$runtime_root/build_logs" build \
   --base-paths FAST_LIO livox_ros_driver2 autonomous_exploration_development_environment/src/terrain_analysis_ext \
-    shaoshao_hw_interfaces hw_registration shaoshao_hw_runtime \
+    shaoshao_hw_interfaces hw_registration hw_omni_controller shaoshao_hw_runtime shaoshao_web \
   --build-base "$runtime_root/build" --install-base "$runtime_root/mapping_install" \
   --executor sequential --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
 if [[ -L "$runtime_root/shaoshao" ]]; then

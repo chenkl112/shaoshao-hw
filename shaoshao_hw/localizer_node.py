@@ -23,6 +23,7 @@ def main():
     from std_srvs.srv import Trigger
     from tf2_ros import TransformBroadcaster
     from shaoshao_hw_interfaces.srv import RegisterCloud
+    from shaoshao_hw_interfaces.msg import LocalizationStatus
     class Localizer(Node):
         def __init__(self):
             super().__init__('hw_localizer')
@@ -37,6 +38,7 @@ def main():
             self.frames=deque(maxlen=6);self.imu_pose=None;self.current_stamp=None
             self.client=self.create_client(RegisterCloud,'/hw/register');self.future=None
             self.tf=TransformBroadcaster(self);self.status_pub=self.create_publisher(String,'/hw/localization/status',10)
+            self.typed_status_pub=self.create_publisher(LocalizationStatus,'/hw/localization/state',10)
             self.create_subscription(PointCloud2,'/cloud_registered',self.cloud,qos_profile_sensor_data)
             self.create_subscription(Odometry,'/navcar/state_estimation',self.odom,10)
             self.create_subscription(LaserScan,'/navcar/scan',self.scan,qos_profile_sensor_data)
@@ -148,6 +150,10 @@ def main():
             # Never emit NaN/Infinity into Web JSON on failed registration.
             state['metrics']={k:(v if not isinstance(v,float) or math.isfinite(v) else None) for k,v in state['metrics'].items()}
             msg=String();msg.data=json.dumps(state,ensure_ascii=False,allow_nan=False);self.status_pub.publish(msg)
+            typed=LocalizationStatus();typed.header.frame_id='map';typed.header.stamp=self.get_clock().now().to_msg()
+            typed.state={'acquiring':0,'tracking':1,'degraded':2,'lost':3}[state['state']]
+            typed.ready=bool(state['ready']);typed.speed_limit_mps=float(state['speed_limit_mps'])
+            self.typed_status_pub.publish(typed)
             signature=(state['state'],state['message'])
             if signature!=self.last_message:self.get_logger().info(msg.data);self.last_message=signature
     rclpy.init();node=Localizer()
