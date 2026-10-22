@@ -80,7 +80,12 @@ def main():
     from tf2_ros import TransformBroadcaster
     from shaoshao_hw_interfaces.msg import ChassisFeedback
     import yaml
-    runtime=Path(os.environ['SHAOSHAO_HW_RUNTIME']);maps=runtime/'synthetic_map'
+    from ament_index_python.packages import get_package_prefix
+    def native(name):return Path(get_package_prefix('shaoshao_hw_runtime'))/'lib/shaoshao_hw_runtime'/name
+    runtime=Path(os.environ['SHAOSHAO_HW_RUNTIME']);runtime.mkdir(parents=True,exist_ok=True)
+    if not (runtime/'shaoshao').exists():(runtime/'shaoshao').symlink_to(SOURCE,target_is_directory=True)
+    subprocess.run([str(native('hw_runtime')),'configure',str(SOURCE),str(runtime)],check=True)
+    maps=runtime/'synthetic_map'
     points=make_bundle(maps)
     (runtime/'mapping_runtime').mkdir(exist_ok=True)
     mapping={'/**':{'ros__parameters':yaml.safe_load((SOURCE/'sentry_bringup/params/fast_lio_mapping_param.yaml').read_text())['/**']['ros__parameters']}}
@@ -139,16 +144,16 @@ def main():
         p=subprocess.Popen(args,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,
             env={**os.environ,'SCURM_WEB_TOKEN':'integration-only'});processes.append(p);return p
     def api(port,path,body=None):
-        token='integration-only' if port==8080 else (runtime/'navcar_move.token').read_text().strip()
+        token=(runtime/('web.token' if port==8080 else 'navcar_move.token')).read_text().strip()
         req=urllib.request.Request(f'http://127.0.0.1:{port}'+path,
             data=None if body is None else json.dumps(body).encode(),
             headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
         with urllib.request.urlopen(req,timeout=2) as response:return json.load(response)
     try:
-        start('move',['python3',str(SOURCE/'web_panel/navcar_move_web.py'),'--hw-ros','--config',str(serial_config),
+        start('move',[str(native('hw_move_web')),'--runtime',str(runtime),'--hw-ros','--config',str(serial_config),
                       '--robot-config',str(SOURCE/'web_panel/robot.yaml')])
         wait_for(lambda:api(8081,'/api/state')['connected'],10,'Native MCU connection')
-        start('web',['python3',str(runtime/'lidar_mapping_web.py'),'--maps-dir',str(maps)])
+        start('web',[str(native('hw_supervisor')),'--runtime',str(runtime),'--maps-dir',str(maps)])
         wait_for(lambda:api(8080,'/api/state'),10,'Web startup')
         api(8080,'/api/mode',{'mode':'navigation'})
         state=wait_for(lambda:(s if (s:=api(8080,'/api/state'))['navigation']['ready'] else None),50,'Global registration / Nav2 activation')
@@ -169,6 +174,11 @@ def main():
         wait_for(lambda:api(8080,'/api/state')['navigation']['status']=='active' and not api(8080,'/api/state')['navigation']['auto_resume_pending'],45,'Re-localize and resume goal')
         resumed_at=time.monotonic()
         wait_for(lambda:any(t>resumed_at and math.hypot(x,y)>.02 for t,x,y,*_ in mcu.commands),10,'Resumed native motion')
+        # Retry RPC must return promptly while the ROS executor keeps processing.
+        retried_at=time.monotonic()
+        api(8080,'/api/localization/retry',{})
+        assert time.monotonic()-retried_at<2.,'Retry RPC blocked the ROS executor'
+        wait_for(lambda:api(8080,'/api/state')['navigation']['status']=='active' and not api(8080,'/api/state')['navigation']['auto_resume_pending'],45,'Explicit relocalization and goal resume')
         # A takeover while localization is lost must defeat deferred auto-resume.
         sensors.enabled=False
         wait_for(lambda:api(8080,'/api/state')['navigation'].get('auto_resume_pending'),8,'Second loss retains target')
@@ -185,10 +195,20 @@ def main():
         assert state['status'] not in ('active','sending') and not state['auto_resume_pending']
         assert math.hypot(mcu.commands[-1][1],mcu.commands[-1][2])<1e-5
         assert max(math.hypot(c[1],c[2]) for c in mcu.commands)<=.50001
+        # A new explicitly requested task is allowed after hardware authority
+        # returns; verify the normal arrival/stopped-goal path too.
+        sensors.control_allowed=True
+        state=wait_for(lambda:(s if (s:=api(8080,'/api/state'))['navigation']['ready'] else None),10,'Authority restored for a new explicit goal')
+        position=state['navigation']['pose']
+        arrival={'x':position['x']+.2,'y':position['y'],'map_revision':api(8080,'/api/map')['revision']}
+        api(8080,'/api/navigation/goal',arrival)
+        wait_for(lambda:api(8080,'/api/state')['navigation']['status']=='succeeded',30,'Explicit goal arrival and stop')
+        time.sleep(.3)
+        assert math.hypot(mcu.commands[-1][1],mcu.commands[-1][2])<1e-5,'Arrival must release motion'
         result={'global_pose_error_m':float(np.linalg.norm([recovered['x']-expected[0],recovered['y']-expected[1]])),
                 'native_commands':len(mcu.commands),'max_command_speed_mps':max(math.hypot(c[1],c[2]) for c in mcu.commands),
                 'checks':['automatic unknown-pose GICP','FDDP activation','time-indexed predictions','synthetic measured feedback','Web preview/goal','native CRC/ACK transport',
-                          'localization loss stops','automatic replan/resume','manual takeover revokes lease']}
+                          'localization loss stops','automatic replan/resume','explicit retry RPC and resume','manual takeover revokes lease','new explicit goal reaches target and stops']}
         (runtime/'integration-result.json').write_text(json.dumps(result,indent=2))
         print(json.dumps(result),flush=True)
     except Exception:

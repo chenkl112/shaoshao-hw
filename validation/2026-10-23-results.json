@@ -1,0 +1,74 @@
+{
+  "date": "2026-10-23",
+  "environment": "Ubuntu 24.04; unpacked ROS 2 Jazzy overlay; x86_64",
+  "synthetic_only": true,
+  "physical_hardware_connected": false,
+  "build": {
+    "tool": "colcon; CMake Release; C++20 runtime",
+    "packages_passed": [
+      "shaoshao_hw_interfaces",
+      "livox_ros_driver2",
+      "fast_lio",
+      "terrain_analysis_ext",
+      "hw_registration",
+      "hw_omni_controller",
+      "shaoshao_web",
+      "shaoshao_hw_runtime"
+    ],
+    "dependencies": {
+      "small_gicp": "57c1106daf83c2c79ee0c58a9c7ed0032298ff4e",
+      "Livox-SDK2": "c0796f04c143143899c87a773d9f6b7136453c0b"
+    }
+  },
+  "regressions": {
+    "python_core": 16,
+    "python_panel": 104,
+    "native_runtime_ctest": "passed",
+    "native_mpc": "passed, including oblique-path full rollout speed/acceleration/jerk limits",
+    "native_obstacles_feedback_relay": "passed",
+    "native_web_http_websocket": "passed",
+    "javascript_ui_suites": 3
+  },
+  "navigation": {
+    "global_pose_error_m": 2.8305445701745535e-06,
+    "native_commands": 760,
+    "max_command_speed_mps": 0.353171083355513,
+    "checks": [
+      "automatic unknown-pose GICP",
+      "FDDP activation",
+      "time-indexed predictions",
+      "synthetic measured feedback",
+      "Web preview/goal",
+      "native CRC/ACK transport",
+      "localization loss stops",
+      "automatic replan/resume",
+      "explicit retry RPC and resume",
+      "manual takeover revokes lease",
+      "new explicit goal reaches target and stops"
+    ]
+  },
+  "supervised_mapping": {
+    "synthetic": true,
+    "scans_sent": 93,
+    "lio_outputs": 90,
+    "cruise_velocity_mps": 0.08001845899993701,
+    "expected_velocity_mps": 0.08,
+    "supervised_modes": true,
+    "map_save": "Native manager saved PCD and 2D PNG",
+    "index_finalize": "Native manager finalized index",
+    "checks": [
+      "native LIO velocity",
+      "finite PSD covariance",
+      "body cloud",
+      "actual ROS recorder",
+      "PCD save",
+      "static index/hash validation"
+    ]
+  },
+  "limitations": [
+    "Synthetic measurements and PTY MCU only; no real MID360 or motors.",
+    "Synthetic registration error is not a measurement of vehicle localization accuracy.",
+    "New MCU byte protocol remains unspecified. UART V1 target echoes are not actual feedback.",
+    "Long duration operation, real response parameters and physical stopping performance were not tested."
+  ]
+}

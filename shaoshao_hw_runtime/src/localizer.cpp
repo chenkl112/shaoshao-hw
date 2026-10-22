@@ -36,7 +36,7 @@ public:
       for(size_t i=0;i<msg->ranges.size();++i){double range=msg->ranges[i];if(std::isfinite(range)&&range>=msg->range_min&&range<msg->range_max){double angle=msg->angle_min+i*msg->angle_increment;points.emplace_back(lidar_xy_+range*Eigen::Vector2d(std::cos(angle),std::sin(angle)));}}
       policy_.scan(seconds(msg->header.stamp),points);
     });
-    retry_=create_service<std_srvs::srv::Trigger>("/hw/localization/retry",[this](auto,auto response){reset();response->success=true;response->message="自动全局重定位已重新开始";});
+    retry_=create_service<std_srvs::srv::Trigger>("/hw/localization/retry",[this](std_srvs::srv::Trigger::Request::SharedPtr, std_srvs::srv::Trigger::Response::SharedPtr response){reset();response->success=true;response->message="自动全局重定位已重新开始";});
     timer_=create_wall_timer(std::chrono::milliseconds(100),std::bind(&Localizer::tick,this));search_started_=steady();
   }
 private:

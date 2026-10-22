@@ -1,6 +1,6 @@
 #include "hw_omni_controller/controller.hpp"
 #include "hw_omni_controller/ros_samples.hpp"
-#include <nav2_core/exceptions.hpp>
+#include <nav2_core/controller_exceptions.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <pluginlib/class_list_macros.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -160,7 +160,7 @@ geometry_msgs::msg::TwistStamped Controller::computeVelocityCommands(const geome
   initial.segment<2>(4)=previous;initial.segment<2>(6)=increment;
   Solution solution;
   try{solution=solve(problem,initial);}catch(const std::exception&){return fail("MPC input or prediction invalid");}
-  if(!solution.valid)return fail("No collision-free feasible MPC rollout");
+  if(!solution.valid)return fail(solution.reason.empty()?"No collision-free feasible MPC rollout":solution.reason);
   U command=rotation(-yaw)*solution.command;
   U delta=command-previous_command_;
   previous_command_=command;previous_increment_=delta;last_output_=now;

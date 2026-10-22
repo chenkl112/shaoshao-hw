@@ -14,7 +14,7 @@ class Tasks {
 public:
   mutable std::recursive_mutex mutex;TaskHooks hooks;fs::path maps;
   std::string mode="idle",target_mode="idle",error,nav_status="idle",nav_message="请在地图上选择目标位置";
-  bool switching=false,mapping_saved=false,localized=false,nav_server=false,stack_ready=false,serial_ready=false,hardware_ready=false;
+  bool switching=false,mapping_saved=false,localized=false,nav_server=false,stack_ready=false,serial_ready=false,hardware_ready=false,hardware_seen=false;
   double cloud_at=0,odom_at=0,pose_at=0,serial_at=0,goal_started=0,plan_started=0;uint64_t goal_generation=0,plan_generation=0,hardware_epoch=0;
   Json::Value pose,local_pose,localization,goal,path=Json::Value(Json::arrayValue),plan,remaining,motion,costmap;
   std::optional<Json::Value> resume;std::optional<uint64_t> resume_plan;double resume_retry_at=0;
@@ -42,7 +42,8 @@ public:
     if(requested!="idle"&&requested!="mapping"&&requested!="navigation")throw std::invalid_argument("Unknown mode");
     if(switching){if(target_mode==requested)return;throw std::runtime_error("正在切换模式，请稍候");}
     if(mode==requested)return;if(!hooks.mode)throw std::runtime_error("Native mode manager unavailable");
-    cancel(false);clear_resume();clear_plan();target_mode=requested;switching=true;error.clear();hooks.mode(requested);
+    cancel(false);clear_resume();clear_plan();target_mode=requested;switching=true;error.clear();
+    try{hooks.mode(requested);}catch(...){switching=false;target_mode=mode;throw;}
   }
   void mode_finished(const std::string& actual,const fs::path& directory,const std::string& failure={}){
     std::lock_guard<std::recursive_mutex> lock(mutex);mode=actual;maps=directory;switching=false;error=failure;target_mode=actual;
@@ -51,7 +52,8 @@ public:
   }
   void request_plan(const Json::Value& body,double now){
     auto target=navigation_target(body);auto why=reason(now);if(!why.empty())throw std::runtime_error(why);if(active())throw std::runtime_error("已有导航任务，请先取消或等待完成");if(!hooks.plan)throw std::runtime_error("路径规划服务不可用");
-    ++plan_generation;plan_started=now;plan["status"]="planning";plan["message"]="正在计算路径…";plan["goal"]=target;plan["path"]=Json::Value(Json::arrayValue);hooks.plan(plan_generation,target);
+    ++plan_generation;plan_started=now;plan["status"]="planning";plan["message"]="正在计算路径…";plan["goal"]=target;plan["path"]=Json::Value(Json::arrayValue);
+    try{hooks.plan(plan_generation,target);}catch(const std::exception& e){plan["status"]="failed";plan["message"]=e.what();throw;}
   }
   void plan_result(uint64_t generation,const std::vector<Eigen::Vector2d>& points,const std::string& failure={}){
     std::lock_guard<std::recursive_mutex> lock(mutex);if(generation!=plan_generation)return;
@@ -65,7 +67,8 @@ public:
   }
   void request_goal(const Json::Value& body,double now){
     auto target=navigation_target(body);auto why=reason(now);if(!why.empty())throw std::runtime_error(why);if(active())throw std::runtime_error("已有导航任务，请先取消或等待完成");if(!hooks.goal)throw std::runtime_error("导航服务不可用");
-    ++goal_generation;goal=target;goal["yaw"]=pose.get("yaw",0.);goal_started=now;++plan_generation;path=Json::Value(Json::arrayValue);nav_status="sending";nav_message="正在发送导航目标…";remaining=Json::Value();hooks.goal(goal_generation,goal);
+    ++goal_generation;goal=target;goal["yaw"]=pose.get("yaw",0.);goal_started=now;++plan_generation;path=Json::Value(Json::arrayValue);nav_status="sending";nav_message="正在发送导航目标…";remaining=Json::Value();
+    try{hooks.goal(goal_generation,goal);}catch(const std::exception& e){nav_status="failed";nav_message=e.what();throw;}
   }
   void goal_response(uint64_t generation,bool accepted){
     std::lock_guard<std::recursive_mutex> lock(mutex);if(generation!=goal_generation)return;
@@ -77,7 +80,7 @@ public:
     nav_status="canceling";nav_message="正在取消导航…";if(hooks.cancel)hooks.cancel();
   }
   void hardware(bool ready,uint64_t epoch){
-    std::lock_guard<std::recursive_mutex> lock(mutex);bool changed=hardware_epoch&&hardware_epoch!=epoch;hardware_ready=ready;hardware_epoch=epoch;
+    std::lock_guard<std::recursive_mutex> lock(mutex);bool changed=hardware_seen&&hardware_epoch!=epoch;hardware_seen=true;hardware_ready=ready;hardware_epoch=epoch;
     if(!ready||changed){cancel();clear_resume();}
   }
   void localization_state(const Json::Value& value){

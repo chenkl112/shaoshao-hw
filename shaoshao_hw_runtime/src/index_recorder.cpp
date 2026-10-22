@@ -13,7 +13,7 @@ public:
     buffer_=std::make_shared<tf2_ros::Buffer>(get_clock());listener_=std::make_shared<tf2_ros::TransformListener>(*buffer_);
     subscription_=create_subscription<sensor_msgs::msg::PointCloud2>("/cloud_registered_body",rclcpp::SensorDataQoS(),[this](sensor_msgs::msg::PointCloud2::SharedPtr msg){if(!finalized_)latest_=msg;});
     timer_=create_wall_timer(std::chrono::milliseconds(100),std::bind(&Recorder::tick,this));
-    service_=create_service<std_srvs::srv::Trigger>("/hw/finalize_index",[this](auto,auto response){
+    service_=create_service<std_srvs::srv::Trigger>("/hw/finalize_index",[this](std_srvs::srv::Trigger::Request::SharedPtr, std_srvs::srv::Trigger::Response::SharedPtr response){
       try{tick();writer_.finalize(maps_/"site.pcd",read_pcd(maps_/"site.pcd"));finalized_=true;response->success=true;response->message="Indexed "+std::to_string(writer_.size())+" static keyframes";}
       catch(const std::exception& e){response->success=false;response->message=e.what();}
     });

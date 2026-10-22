@@ -25,23 +25,25 @@ find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(message_filters REQUIRED)
+find_package(PCL REQUIRED COMPONENTS common io filters kdtree features surface segmentation)
 find_package(pcl_conversions REQUIRED)
-find_package(pcl_ros REQUIRED)
-find_package(PCL REQUIRED)
 
 add_executable(terrainAnalysisExt src/terrainAnalysisExt.cpp)
-ament_target_dependencies(terrainAnalysisExt rclcpp std_msgs sensor_msgs nav_msgs geometry_msgs tf2 tf2_ros tf2_geometry_msgs message_filters pcl_ros pcl_conversions)
+ament_target_dependencies(terrainAnalysisExt rclcpp std_msgs sensor_msgs nav_msgs geometry_msgs tf2 tf2_ros tf2_geometry_msgs message_filters pcl_conversions)
 
 
 add_executable(PCDPublisherNode src/PCDPublisherNode.cpp)
-ament_target_dependencies(PCDPublisherNode rclcpp std_msgs sensor_msgs nav_msgs geometry_msgs tf2 tf2_ros tf2_geometry_msgs message_filters pcl_ros pcl_conversions)
+ament_target_dependencies(PCDPublisherNode rclcpp std_msgs sensor_msgs nav_msgs geometry_msgs tf2 tf2_ros tf2_geometry_msgs message_filters pcl_conversions)
 
 add_executable(PCDSaverNode src/PCDSaverNode.cpp)
-ament_target_dependencies(PCDSaverNode rclcpp std_msgs sensor_msgs nav_msgs geometry_msgs tf2 tf2_ros tf2_geometry_msgs message_filters pcl_ros pcl_conversions)
+ament_target_dependencies(PCDSaverNode rclcpp std_msgs sensor_msgs nav_msgs geometry_msgs tf2 tf2_ros tf2_geometry_msgs message_filters pcl_conversions)
 
 add_executable(pathNorm src/pathNorm.cpp)
-ament_target_dependencies(pathNorm rclcpp std_msgs sensor_msgs nav_msgs geometry_msgs tf2 tf2_ros tf2_geometry_msgs message_filters pcl_ros pcl_conversions)
-target_link_libraries(pathNorm ${PCL_LIBRARIES})
+ament_target_dependencies(pathNorm rclcpp std_msgs sensor_msgs nav_msgs geometry_msgs tf2 tf2_ros tf2_geometry_msgs message_filters pcl_conversions)
+foreach(target terrainAnalysisExt PCDPublisherNode PCDSaverNode pathNorm)
+  target_include_directories(${target} PRIVATE ${PCL_INCLUDE_DIRS})
+  target_link_libraries(${target} ${PCL_LIBRARIES})
+endforeach()
 
 install(TARGETS
   terrainAnalysisExt

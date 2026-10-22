@@ -22,7 +22,9 @@ inline YAML::Node mapping_configuration(const fs::path& source,const fs::path& m
   parameters["common"]["odom_frame_id"]="odom";parameters["common"]["sensor_frame_id"]="imu_link";parameters["common"]["send_odom_base_tf"]=false;
   parameters["mapping"]["extrinsic_est_en"]=false;
   for(int i=0;i<3;++i)parameters["mapping"]["extrinsic_T"][i]=config.lidar_offset[i];
-  for(int i=0;i<9;++i)parameters["mapping"]["extrinsic_R"][i]=(i%4==0)?1.:0.;
+  // yaml-cpp encodes integral doubles as "1"/"0". ROS then infers an
+  // integer_array and rejects FAST-LIO's double_array parameter.
+  for(int i=0;i<9;++i)parameters["mapping"]["extrinsic_R"][i]=(i%4==0)?"1.0":"0.0";
   parameters["map_filter"]["enabled"]=filter["enabled"].asBool();parameters["map_filter"]["max_height"]=filter["height_m"].asDouble();parameters["map_filter"]["dynamic_enabled"]=true;parameters["map_filter"]["static_resolution"]=config.resolution;
   return YAML::Clone(root);
 }

@@ -36,7 +36,7 @@ colcon --log-base "$runtime_root/build_logs" build \
   --base-paths FAST_LIO livox_ros_driver2 autonomous_exploration_development_environment/src/terrain_analysis_ext \
     shaoshao_hw_interfaces hw_registration hw_omni_controller shaoshao_hw_runtime shaoshao_web \
   --build-base "$runtime_root/build" --install-base "$runtime_root/mapping_install" \
-  --executor sequential --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+  --executor sequential --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING="${SHAOSHAO_BUILD_TESTING:-OFF}"
 if [[ -L "$runtime_root/shaoshao" ]]; then
   [[ "$(readlink -f "$runtime_root/shaoshao")" == "$source_root" ]] || { echo 'Runtime belongs to another checkout' >&2; exit 1; }
 elif [[ -e "$runtime_root/shaoshao" ]]; then
@@ -53,6 +53,9 @@ for entry in "$source_root/deployment/"*; do
     *) cp -a "$entry" "$runtime_root/" ;;
   esac
 done
-python3 "$source_root/deployment/setup_runtime.py" "$source_root" "$runtime_root"
+set +u
+source "$runtime_root/mapping_install/setup.bash"
+set -u
+"$runtime_root/mapping_install/shaoshao_hw_runtime/lib/shaoshao_hw_runtime/hw_runtime" configure "$source_root" "$runtime_root"
 chmod +x "$runtime_root/"*.sh
 echo "Built Shaoshao HW. Runtime: $runtime_root"

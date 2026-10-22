@@ -53,7 +53,7 @@
 #include <pcl/point_types.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/io/pcd_io.h>
-#include <pcl_ros/transforms.hpp>
+#include <pcl/common/transforms.h>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <std_srvs/srv/trigger.hpp>
@@ -1156,7 +1156,14 @@ private:
                     }
                     tf2::Transform trans;
                     tf2::fromMsg(initial_pose.pose.pose, trans);
-                    pcl_ros::transformPointCloud(*feats_down_prior_map, *feats_down_prior_map, trans.inverse());
+                    Eigen::Matrix4f prior_transform = Eigen::Matrix4f::Identity();
+                    auto inverse = trans.inverse();
+                    for (int row=0; row<3; ++row) {
+                        for (int col=0; col<3; ++col)
+                            prior_transform(row,col) = inverse.getBasis()[row][col];
+                        prior_transform(row,3) = inverse.getOrigin()[row];
+                    }
+                    pcl::transformPointCloud(*feats_down_prior_map, *feats_down_prior_map, prior_transform);
 
                     // puiblish the transformed prior map
                     sensor_msgs::msg::PointCloud2 prior_map_msg;

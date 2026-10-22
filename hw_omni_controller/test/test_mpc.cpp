@@ -67,7 +67,25 @@ void predictive_avoidance(){
   require(predicted.valid,"Predictive avoidance must find a feasible rollout in the crossing fixture");
   require(p.safe(predicted.states,predicted.commands),"Optimized rollout must avoid the moving footprint");
 }
+void full_rollout_speed(){
+  // An oblique path can push future controls outside the speed disk even
+  // though every QP axis stays within [-speed,speed]. Check every output and
+  // re-rolled future step with a response faster than the initial model.
+  X x=X::Zero();
+  for(int i=0;i<100;++i){
+    auto p=reference(U(1.,.4));auto result=solve(p,x);
+    require(result.valid,"Oblique path must retain a feasible complete rollout");
+    require(p.safe(result.states,result.commands),"Backtracked rollout must satisfy collisions and vector speed");
+    for(int k=0;k<N;++k){auto bounds=p.control_bounds(k,result.states[k]);
+      require((result.commands[k].array()>=bounds.lower.array()-1e-7).all()&&
+        (result.commands[k].array()<=bounds.upper.array()+1e-7).all(),"Backtracking preserves target acceleration and jerk bounds");}
+    auto next=p.dynamics(0,x,result.command);x=next;
+    // Synthetic plant mismatch, not a change to commissioned response params.
+    x.segment<2>(2)+=.15*(result.command-x.segment<2>(2));
+  }
+  require((x.head<2>()-U(1.,.4)).norm()<.08,"Constrained oblique path must make progress");
+}
 int main(){
-  try{dynamics_and_cost_derivatives();closed_loop(U(.5,0));closed_loop(U(0,.5));closed_loop(U(.35,.35));predictions_and_collisions();predictive_avoidance();std::cout<<"All native MPC tests passed\n";}
+  try{dynamics_and_cost_derivatives();closed_loop(U(.5,0));closed_loop(U(0,.5));closed_loop(U(.35,.35));predictions_and_collisions();predictive_avoidance();full_rollout_speed();std::cout<<"All native MPC tests passed\n";}
   catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

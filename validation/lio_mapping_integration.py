@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.request
 import numpy as np
 import yaml
 
@@ -47,15 +48,43 @@ def main():
     node.create_subscription(Odometry,'/state_estimation',outputs.append,100)
     node.create_subscription(PointCloud2,'/cloud_registered_body',lambda m:body.append(m.width*m.height),10)
     log=(runtime/'mapping-validation.log').open('w')
-    process=subprocess.Popen(['ros2','launch',str(SOURCE/'deployment/mapping_runtime/mapping.launch.py')],
+    from ament_index_python.packages import get_package_prefix
+    native=Path(get_package_prefix('shaoshao_hw_runtime'))/'lib/shaoshao_hw_runtime'
+    (runtime/'mapping_runtime/terrain.yaml').write_text(yaml.safe_dump({'terrainAnalysisExt':{'ros__parameters':{'map_frame':'odom','localTerrainMapRadius':0.}}}))
+    supervised=os.environ.get('SHAOSHAO_MAPPING_SUPERVISOR')=='1'
+    subprocess.run([str(native/'hw_runtime'),'configure',str(SOURCE),str(runtime)],check=True)
+    command=([str(native/'hw_supervisor'),'--runtime',str(runtime),'--maps-dir',str(maps)] if supervised else
+             [str(native/'hw_stack'),'--runtime',str(runtime),'--role','mapping','--maps-dir',str(maps)])
+    process=subprocess.Popen(command,
                              stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
-    points=make_scene();offset=np.array([-.011,-.02329,.04412])
-    # Known continuous trajectory: rest -> acceleration -> 0.08 m/s cruise.
-    def position(t):
-        a=max(0.,t-3.)
-        return .025*a*a if a<=1.6 else .064+.08*(a-1.6)
-    start=time.monotonic();last_scan=-1;sent=0
     try:
+        def api(path='/api/state',body=None):
+            token=(runtime/'web.token').read_text().strip()
+            request=urllib.request.Request('http://127.0.0.1:8080'+path,
+                data=None if body is None else json.dumps(body).encode(),
+                headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
+            with urllib.request.urlopen(request,timeout=2) as response:return json.load(response)
+        def wait_state(check,timeout):
+            until=time.monotonic()+timeout;last=None
+            while time.monotonic()<until:
+                try:
+                    last=api()
+                    if check(last):return last
+                except Exception:pass
+                rclpy.spin_once(node,timeout_sec=.01);time.sleep(.05)
+            raise AssertionError(last)
+        if supervised:
+            wait_state(lambda s:s['mode']=='idle',10)
+            api('/api/mode',{'mode':'mapping'})
+            state=wait_state(lambda s:s['mode']=='mapping' and not s['switching'],15)
+            assert not state['error'],state
+            maps=Path(state['mapping_control']['maps_dir'])
+        points=make_scene();offset=np.array([-.011,-.02329,.04412])
+        # Known continuous trajectory: rest -> acceleration -> 0.08 m/s cruise.
+        def position(t):
+            a=max(0.,t-3.)
+            return .025*a*a if a<=1.6 else .064+.08*(a-1.6)
+        start=time.monotonic();last_scan=-1;sent=0
         while time.monotonic()-start<10:
             t=time.monotonic()-start
             stamp=node.get_clock().now().to_msg()
@@ -96,11 +125,19 @@ def main():
             rclpy.spin_until_future_complete(node,future,timeout_sec=30)
             assert future.done() and future.result().success,(service,future.result())
             return future.result().message
-        saved=call('/map_save');indexed=call('/hw/finalize_index')
+        if supervised:
+            wait_state(lambda s:api('/api/map').get('available'),10)
+            api('/api/mode',{'mode':'idle'})
+            state=wait_state(lambda s:s['mode']=='idle' and not s['switching'],45)
+            assert not state['error'] and state['mapping_control']['saved'],state
+            assert api('/api/map')['available'],'C++ panel did not save the 2D map'
+            saved='Native manager saved PCD and 2D PNG';indexed='Native manager finalized index'
+        else:
+            saved=call('/map_save');indexed=call('/hw/finalize_index')
         index=RetrievalIndex(maps/'keyframes',maps/'site.pcd')
         result={'synthetic':True,'scans_sent':sent,'lio_outputs':len(outputs),
                 'cruise_velocity_mps':speed,'expected_velocity_mps':.08,
-                'map_save':saved,'index_finalize':indexed,'checks':['native LIO velocity','finite PSD covariance',
+                'supervised_modes':supervised,'map_save':saved,'index_finalize':indexed,'checks':['native LIO velocity','finite PSD covariance',
                 'body cloud','actual ROS recorder','PCD save','static index/hash validation']}
         (runtime/'result.json').write_text(json.dumps(result,indent=2));print(json.dumps(result))
     finally:

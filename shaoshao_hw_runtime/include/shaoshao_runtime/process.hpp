@@ -69,7 +69,7 @@ inline fs::path executable(const fs::path& runtime,const std::string& package,co
   // colcon installs package executables below <prefix>/lib/<package>/<name>.
   // Keep the runtime prefix first so native services work even when the
   // caller did not source mapping_install/setup.bash.
-  std::vector<fs::path> prefixes{runtime/"mapping_install"};
+  std::vector<fs::path> prefixes{runtime/"mapping_install"/package,runtime/"mapping_install"};
   if(const char* environment=std::getenv("AMENT_PREFIX_PATH")){std::istringstream list(environment);std::string prefix;while(std::getline(list,prefix,':'))prefixes.emplace_back(prefix);}
   prefixes.emplace_back("/opt/ros/jazzy");for(const auto& prefix:prefixes){auto binary=prefix/"lib"/package/name;if(fs::is_regular_file(binary)&&access(binary.c_str(),X_OK)==0)return binary;}
   throw std::runtime_error("Required native executable not found: "+package+"/"+name);

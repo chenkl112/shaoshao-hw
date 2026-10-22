@@ -11,6 +11,7 @@ sudo apt update
 sudo apt install build-essential cmake git python3-dev python3-colcon-common-extensions \
   python3-numpy python3-scipy python3-pil python3-yaml python3-serial \
   libeigen3-dev libpcl-dev libapr1-dev libcurl4-openssl-dev \
+  libssl-dev libminizip-dev libpng-dev \
   libdrogon-dev libjsoncpp-dev libtrantor-dev uuid-dev zlib1g-dev libbrotli-dev \
   libhiredis-dev libpq-dev libmariadb-dev libsqlite3-dev libyaml-cpp-dev \
   ros-jazzy-navigation2 ros-jazzy-nav2-bringup ros-jazzy-nav2-mppi-controller \
@@ -46,7 +47,7 @@ bash ~/ccc/shaoshao-hw-runtime/start_move_web.sh
 bash ~/ccc/shaoshao-hw-runtime/start_mapping.sh --idle
 ```
 
-访问 `http://车载电脑IP:8080/?token=终端输出的token`；8081 为手动控制。主网页沿用现有哨哨外观，由 JavaScript 前端和 C++ Drogon 服务提供；内部 Python 仅保留任务监管。详见 [网页架构](网页架构.md)。
+访问 `http://车载电脑IP:8080/?token=终端输出的token`；8081 为手动控制。主网页沿用现有哨哨外观，由 JavaScript 前端和 C++ Drogon 服务提供；内部任务监管、定位调度、地图索引和 8081 串口服务也使用 C++。详见 [网页架构](网页架构.md)。
 
 1. 点击“建图”，用 8081 或已有遥控方式缓慢走遍场地，覆盖通道入口和两侧墙。开始时静止等待 IMU 初始化，保证点云稳定。
 2. 点击“待机”或切换“导航”。程序先通过 `/map_save` 保存静态 PCD，再调用 `/hw/finalize_index` 生成配套索引，然后退出建图。任一步失败会显示错误并保留建图进程。
@@ -64,13 +65,13 @@ bash ~/ccc/shaoshao-hw-runtime/start_mapping.sh --idle
 | 栅格边长 | 同上 `navigation.map_resolution_m: 0.025`；更改后必须重新建图 |
 | 外接圆、光心高度 | 同上 `robot.circumscribed_radius_m`、`lidar_height_m` |
 | 光心相对 yaw 轴偏移 | 同上 `yaw.lidar_offset_xy_m` |
-| 配准质量与时间限制 | 可在同上 `navigation.registration` 覆盖，完整默认值见 `shaoshao_hw/config.py` |
+| 配准质量与时间限制 | 可在同上 `navigation.registration` 覆盖，完整默认值见 `shaoshao_hw_runtime/include/shaoshao_runtime/common.hpp` |
 | 加减速度、jerk | 可在同上 `navigation.motion` 覆盖，默认 0.3 / 0.3 / 1.0 |
 | 串口与实测倍率 | 运行目录 `config/serial.navcar.yaml` |
 | 雷达网络 | 运行目录 `config/MID360_config.json` |
 | FDDP 整车响应参数 | `web_panel/robot.yaml` → `navigation.mpc`；0.30 s 为初始假设，待辨识 |
-| 动态障碍跟踪 | 同上 `navigation.obstacles`，默认值见 `shaoshao_hw/config.py` |
-| 代价地图、碰撞余量 | `web_panel/navcar_navigation.py` |
+| 动态障碍跟踪 | 同上 `navigation.obstacles`，默认值见 `shaoshao_hw_runtime/include/shaoshao_runtime/common.hpp` |
+| 代价地图、碰撞余量 | `shaoshao_hw_runtime/include/shaoshao_runtime/configuration.hpp` |
 
 不要直接修改生成的 `navigation_runtime/nav2.yaml`，下次切换导航会重新生成。改源码参数后退出导航并重新进入；修改 C++ 后重新运行 bootstrap 并重启相关服务。
 
@@ -94,4 +95,4 @@ ros2 topic hz /hw/nav_command
 
 回旧版时，在新网页取消导航、进入待机，8081停止，再退出新网页/串口进程，按旧版原入口启动。不要同时启动两套控制服务。旧地图与参数无需替换。
 
-本次原生 C++ 与 Python 测试可执行；新增 ROS 插件和消息仍需 Jazzy 编译联调，尚未连接真实 MID360/底盘。首次上车需验证速度换算、失联停车、人工接管、定位误差，再逐步增加速度与测试通道。650 mm 通道对当前外接圆模型余量很小，不承诺可通行。
+C++ 运行链路已在临时 Jazzy 环境构建并完成合成输入联调，详见 [验证记录](../validation/README.md)。尚未连接真实 MID360/底盘。首次上车需验证速度换算、失联停车、人工接管、定位误差，再逐步增加速度与测试通道。650 mm 通道对当前外接圆模型余量很小，不承诺可通行。

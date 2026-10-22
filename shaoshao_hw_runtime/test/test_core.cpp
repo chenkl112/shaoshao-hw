@@ -4,6 +4,7 @@
 #include "shaoshao_runtime/policy.hpp"
 #include "shaoshao_runtime/process.hpp"
 #include "shaoshao_runtime/serial.hpp"
+#include "shaoshao_runtime/tasks.hpp"
 #include <iostream>
 #include <random>
 
@@ -50,6 +51,8 @@ void uart(){
 void configurations(const fs::path& root,const fs::path& source){
   auto runtime=root/"runtime";fs::create_directories(runtime);fs::create_directory_symlink(source,runtime/"shaoshao");configure_runtime(source,runtime);Config config(source/"web_panel/robot.yaml");
   auto maps=root/"new-map";fs::create_directories(maps);write_yaml(runtime/"mapping_runtime/fast_lio.yaml",mapping_configuration(source,maps,config));
+  auto lio=YAML::LoadFile((runtime/"mapping_runtime/fast_lio.yaml").string());
+  require(lio["/**"]["ros__parameters"]["mapping"]["extrinsic_R"][0].Scalar()=="1.0", "ROS rotation parameters must retain double_array type");
   atomic_write(maps/"site.yaml","image: site.png\nresolution: 0.025\n");auto frames=navigation_configuration(runtime,maps,config);
   require(std::abs(frames["center_offset"][0].asDouble()-.00318)<1e-8,"Preserve measured reference offset");auto nav=YAML::LoadFile((runtime/"navigation_runtime/nav2.yaml").string());
   require(nav["controller_server"]["ros__parameters"]["FollowPath"]["plugin"].as<std::string>()=="hw_omni_controller::Controller","Native configuration keeps FDDP");require(nav["local_costmap"]["local_costmap"]["ros__parameters"]["global_frame"].as<std::string>()=="map","Native configuration keeps map-frame predictions");
@@ -61,8 +64,27 @@ void processes(const fs::path& root){
   rejects([&]{auto foreign=Process::attach(getpid(),0,"not-this-process");},"Never signal a foreign/reused process");
   FileLock owner(root/"runtime.lock");rejects([&]{FileLock duplicate(root/"runtime.lock");},"Exclusive runtime ownership");
 }
+void tasks(const fs::path& root){
+  auto maps=root/"task-map";std::vector<int8_t> grid(10000,0);grid[5050]=100;
+  require(save_grid(maps,100,100,.025,Point::Zero(),grid),"Save projected grid as PNG/YAML");
+  auto map=saved_map(maps);require(map.info["available"].asBool()&&map.info["width"].asUInt()==100,"Published grid is readable by native panel");
+  Tasks t(maps);t.hooks.mode=[](auto){throw std::runtime_error("start failed");};
+  rejects([&]{t.request_mode("navigation");},"Propagate process startup failure");
+  require(!t.switching&&t.mode=="idle","Startup failure must not lock mode switching");
+  t.mode="navigation";t.localized=t.hardware_ready=t.nav_server=t.stack_ready=t.serial_ready=true;
+  t.cloud_at=t.odom_at=t.pose_at=t.serial_at=10;t.pose["yaw"]=0;
+  Json::Value goal;goal["x"]=1.;goal["y"]=1.;goal["map_revision"]=map.info["revision"];
+  t.hooks.plan=[](auto,const auto&){throw std::runtime_error("planner unavailable");};
+  rejects([&]{t.request_plan(goal,10);},"Propagate planning transport failure");
+  require(t.plan["status"].asString()=="failed","Failed plan must not remain pending");
+  t.hooks.goal=[](auto,const auto&){throw std::runtime_error("lease unavailable");};
+  rejects([&]{t.request_goal(goal,10);},"Propagate control lease failure");
+  require(t.nav_status=="failed"&&!t.active(),"Failed goal must not remain active");
+  t.hardware(true,0);t.nav_status="active";t.resume=goal;t.hardware(true,1);
+  require(t.nav_status=="canceling"&&!t.resume,"Authority epoch zero is valid: 0 -> 1 must cancel and revoke deferred resume");
+}
 int main(int argc,char** argv){
   if(argc!=2){std::cerr<<"Provide repository root\n";return 2;}auto root=fs::temp_directory_path()/("hw-native-"+std::to_string(getpid()));fs::create_directories(root);
-  try{localization();indices(root);uart();configurations(root,fs::absolute(argv[1]));processes(root);fs::remove_all(root);std::cout<<"Native localization, index, UART, configuration and process tests passed\n";}
+  try{localization();indices(root);uart();configurations(root,fs::absolute(argv[1]));processes(root);tasks(root);fs::remove_all(root);std::cout<<"Native localization, index, UART, configuration, process and task tests passed\n";}
   catch(const std::exception& e){std::cerr<<e.what()<<"; evidence: "<<root<<'\n';return 1;}
 }

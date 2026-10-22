@@ -230,9 +230,9 @@ else($ENV{ROS_VERSION} STREQUAL "2")
   # uncomment the following section in order to fill in
   # further dependencies manually.
   # find_package(<dependency> REQUIRED)
+  find_package(PCL REQUIRED COMPONENTS common io)
   find_package(ament_cmake_auto REQUIRED)
   ament_auto_find_build_dependencies()
-  find_package(PCL REQUIRED)
   find_package(std_msgs REQUIRED)
   find_package(builtin_interfaces REQUIRED)
   find_package(rosidl_default_generators REQUIRED)
