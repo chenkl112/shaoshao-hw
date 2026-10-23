@@ -52,7 +52,12 @@ int main(int argc,char** argv){
       app.registerHandler(route,[&,route](const drogon::HttpRequestPtr& request,std::function<void(const drogon::HttpResponsePtr&)>&& callback){
         Json::Value output;if(!equal_token(request->getHeader("authorization"),"Bearer "+token)){output["error"]="访问令牌错误";callback(reply(401,output));return;}
         try{auto data=json_parse(std::string(request->body()));if(!data.isObject())throw std::invalid_argument("需要命令对象");std::lock_guard<std::mutex> lock(mutex);double now=steady();
-          if(route=="/api/navigation/acquire")output["lease"]=controller.acquire(now);
+          if(route=="/api/navigation/acquire"){
+            Config limits(robot_configuration(root));
+            controller.settings.max_speed=std::min(limits.speed,std::min(.5,settings.max_translation/std::max(settings.forward,settings.left)));
+            std::optional<uint64_t> expected;if(data.isMember("manual_epoch"))expected=sequence_number(data,"manual_epoch");
+            output["lease"]=controller.acquire(now,expected);output["manual_epoch"]=Json::UInt64(controller.manual_epoch);
+          }
           else{if(route=="/api/command")controller.manual(data,now);else if(route=="/api/yaw")controller.set_yaw(data,now);else if(route=="/api/spin")controller.set_spin(data,now);else if(route=="/api/navigation/command")controller.navigation_command(data,now);else controller.release(data["lease"].asString());output=controller.state(now);}callback(reply(200,output));
         }catch(const std::invalid_argument& e){output["error"]=e.what();callback(reply(400,output));}catch(const std::exception& e){output["error"]=e.what();callback(reply(409,output));}
       },{drogon::Post});

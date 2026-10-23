@@ -4,7 +4,10 @@
 #include <pcl/point_types.h>
 #include <pcl/point_cloud.h>
 #include <pcl_conversions/pcl_conversions.h>
+#include <pcl/io/pcd_io.h>
+#include <std_srvs/srv/trigger.hpp>
 #include "static_map_projection.hpp"
+#include "static_map_export.hpp"
 
 class StaticMapProjector:public rclcpp::Node {
     StaticMapProjection projection_;
@@ -15,9 +18,12 @@ class StaticMapProjector:public rclcpp::Node {
     rclcpp::TimerBase::SharedPtr timer_;
     double resolution_;
     bool dirty_=false;
+    std::string map_path_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr export_;
 public:
     StaticMapProjector():Node("static_map_projector") {
         resolution_=declare_parameter<double>("resolution",.05);
+        map_path_=declare_parameter<std::string>("map_path","");
         if(!std::isfinite(resolution_)||resolution_<.01||resolution_>1.)
             throw std::invalid_argument("Static projected map resolution must be in [0.01, 1.0] m");
         pub_=create_publisher<nav_msgs::msg::OccupancyGrid>("/projected_map",rclcpp::QoS(1).transient_local().reliable());
@@ -33,6 +39,17 @@ public:
                 projection_.terrain(terrain);dirty_=true;
             });
         timer_=create_wall_timer(std::chrono::seconds(1),[this](){publish();});
+        export_=create_service<std_srvs::srv::Trigger>("/hw/export_grid",
+            [this](std_srvs::srv::Trigger::Request::SharedPtr,std_srvs::srv::Trigger::Response::SharedPtr response){
+                try{
+                    pcl::PointCloud<pcl::PointXYZI> saved;
+                    if(map_path_.empty()||pcl::io::loadPCDFile(map_path_,saved)<0)throw std::runtime_error("Cannot read saved PCD for projection");
+                    StaticMapProjection::Grid grid;grid.resolution=resolution_;
+                    if(!projection_.project(saved,grid))throw std::runtime_error("Saved PCD/floor data cannot produce a 2D map");
+                    export_static_grid(std::filesystem::path(map_path_).parent_path(),grid);
+                    response->success=true;response->message="Projected saved PCD to PNG/YAML";
+                }catch(const std::exception& e){response->success=false;response->message=e.what();}
+            });
     }
     void publish() {
         if(!dirty_)return;

@@ -112,6 +112,10 @@ void relay_gates(){
   r=relay();Obstacle obstacle;obstacle.footprint={U(-.1,-.1),U(.1,-.1),U(.1,.1),U(-.1,.1)};
   for(int i=0;i<=30;++i)obstacle.centers.emplace_back(.05,.5-i*.1);
   r.obstacles={obstacle};require(!r.step(1.02).moving,"Relay checks future obstacle position in braking corridor");
+  r=relay();r.grid.cells[110*200+100]=255;
+  require(!r.step(1.02).moving,"Relay rejects unknown cells under the body even when its center is clear");
+  r=relay();require(r.step(1.25).lease=="lease-A","Stale task heartbeat first sends a bounded zero");
+  require(r.step(1.5).lease.empty(),"An orphan task must stop renewing the UART lease with zeros");
 }
 int main(){
   try{detector_and_shapes();tracking();clouds();feedback();relay_gates();std::cout<<"All native obstacle, feedback and command-relay tests passed\n";}

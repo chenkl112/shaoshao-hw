@@ -3,6 +3,10 @@
 
 namespace hw_runtime {
 inline YAML::Node yaml_from_json(const Json::Value& value){return YAML::Load(json_text(value));}
+inline YAML::Node ros_double(double value){
+  if(!std::isfinite(value))throw std::invalid_argument("Nonfinite ROS parameter");
+  return yaml_from_json(Json::Value(value));
+}
 inline Json::Value yaml_to_json(const YAML::Node& node){
   if(!node||node.IsNull())return Json::Value();if(node.IsSequence()){Json::Value out(Json::arrayValue);for(auto item:node)out.append(yaml_to_json(item));return out;}
   if(node.IsMap()){Json::Value out(Json::objectValue);for(auto item:node)out[item.first.as<std::string>()]=yaml_to_json(item.second);return out;}
@@ -21,11 +25,11 @@ inline YAML::Node mapping_configuration(const fs::path& source,const fs::path& m
   parameters["preprocess"]["lidar_type"]=1;parameters["preprocess"]["blind"]=.2;
   parameters["common"]["odom_frame_id"]="odom";parameters["common"]["sensor_frame_id"]="imu_link";parameters["common"]["send_odom_base_tf"]=false;
   parameters["mapping"]["extrinsic_est_en"]=false;
-  for(int i=0;i<3;++i)parameters["mapping"]["extrinsic_T"][i]=config.lidar_offset[i];
+  for(int i=0;i<3;++i)parameters["mapping"]["extrinsic_T"][i]=ros_double(config.lidar_offset[i]);
   // yaml-cpp encodes integral doubles as "1"/"0". ROS then infers an
   // integer_array and rejects FAST-LIO's double_array parameter.
   for(int i=0;i<9;++i)parameters["mapping"]["extrinsic_R"][i]=(i%4==0)?"1.0":"0.0";
-  parameters["map_filter"]["enabled"]=filter["enabled"].asBool();parameters["map_filter"]["max_height"]=filter["height_m"].asDouble();parameters["map_filter"]["dynamic_enabled"]=true;parameters["map_filter"]["static_resolution"]=config.resolution;
+  parameters["map_filter"]["enabled"]=filter["enabled"].asBool();parameters["map_filter"]["max_height"]=ros_double(filter["height_m"].asDouble());parameters["map_filter"]["dynamic_enabled"]=true;parameters["map_filter"]["static_resolution"]=ros_double(config.resolution);
   return YAML::Clone(root);
 }
 inline Json::Value navigation_configuration(const fs::path& runtime,const fs::path& maps,Config config){
@@ -63,6 +67,8 @@ inline Json::Value navigation_configuration(const fs::path& runtime,const fs::pa
   parameters["local_costmap"]["local_costmap"]["ros__parameters"]=local;parameters["global_costmap"]["global_costmap"]["ros__parameters"]=global;
   parameters["bt_navigator"]["ros__parameters"]["default_nav_to_pose_bt_xml"]=(source/"web_panel/navcar_translation.xml").string();
   Json::Value obstacles=config.yaml["navigation"]["obstacles"]?yaml_to_json(config.yaml["navigation"]["obstacles"]):Json::Value(Json::objectValue);
+  for(const auto* key:{"resolution_m","range_m","static_distance_m","association_gate_m","lost_timeout_s","velocity_decay_s"})
+    if(obstacles.isMember(key))obstacles[key]=finite_number(obstacles,key); // ROS declares these as doubles, even for an input such as 8.
   obstacles["map_path"]=(maps/"site.pcd").string();obstacles["lidar_height_m"]=config.lidar_height;parameters["hw_obstacle_predictor"]["ros__parameters"]=obstacles;
   auto& relay=parameters["hw_command_relay"]["ros__parameters"];relay["max_speed_mps"]=config.speed;relay["deceleration_mps2"]=std::min(config.acceleration,config.deceleration);relay["jerk_mps3"]=config.jerk;relay["collision_radius_m"]=config.radius+.02;relay["feedback_timeout_s"]=config.feedback_timeout;
   write_yaml(output/"nav2.yaml",yaml_from_json(parameters));return frames;

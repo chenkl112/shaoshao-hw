@@ -1,0 +1,83 @@
+{
+  "date": "2026-10-23",
+  "base_review_commit": "c603d61",
+  "synthetic_only": true,
+  "physical_hardware_connected": false,
+  "environment": "Ubuntu 24.04, unpacked ROS 2 Jazzy overlay, C++20 Release",
+  "build": {
+    "packages_passed": [
+      "shaoshao_hw_interfaces",
+      "livox_ros_driver2",
+      "fast_lio",
+      "terrain_analysis_ext",
+      "hw_registration",
+      "hw_omni_controller",
+      "shaoshao_web",
+      "shaoshao_hw_runtime"
+    ]
+  },
+  "review_regressions": {
+    "unknown_body": "MPC and relay reject unknown under the circular body, swept steps and map edges",
+    "manual_stop": "65 client sessions; stop works during navigation with unused movement fields invalid",
+    "auto_resume": "planner and UART acquisition exceptions, asynchronous rejection, retry backoff, acceptance and cancel exception",
+    "degraded_limit": "zero hold while target/actual speed exceed new limit; restart feasible MPC after actual speed settles",
+    "ros_yaml_types": "height 2.0, integral float arrays and obstacle range 8 remain ROS doubles",
+    "map_snapshot": "stale grid rejected; saved-PCD projection; PCD/YAML/PNG hash bundle; tampering rejected",
+    "orphan_lease": "TTL expires with healthy MCU; fresh lease and sequence accepted; expired-lease packets rejected",
+    "config_reload": "validated snapshot; failed reload preserves snapshot; real mode restart updates MPC tau and UART speed limit"
+  },
+  "other_tests": {
+    "runtime_ctest": "passed",
+    "native_mpc": "passed",
+    "native_obstacles_feedback_relay": "passed",
+    "python_core": 16,
+    "python_panel": 104,
+    "javascript_ui_suites": 3,
+    "cpp_http_websocket": "passed"
+  },
+  "navigation": {
+    "global_pose_error_m": 2.8368663398175993e-06,
+    "native_commands": 1751,
+    "max_command_speed_mps": 0.1715103053726829,
+    "checks": [
+      "automatic unknown-pose GICP",
+      "FDDP activation",
+      "time-indexed predictions",
+      "synthetic measured feedback",
+      "Web preview/goal",
+      "native CRC/ACK transport",
+      "localization loss stops",
+      "automatic replan/resume",
+      "explicit retry RPC and resume",
+      "manual takeover revokes lease",
+      "new explicit goal reaches target and stops",
+      "65-page stop capacity",
+      "orphan lease expires and reacquires",
+      "mode switch reloads MPC and UART limits"
+    ]
+  },
+  "supervised_mapping": {
+    "synthetic": true,
+    "scans_sent": 93,
+    "lio_outputs": 89,
+    "cruise_velocity_mps": 0.07987676319496345,
+    "expected_velocity_mps": 0.08,
+    "supervised_modes": true,
+    "map_save": "Native manager saved PCD and 2D PNG",
+    "index_finalize": "Native manager finalized index",
+    "checks": [
+      "native LIO velocity",
+      "finite PSD covariance",
+      "body cloud",
+      "actual ROS recorder",
+      "PCD save",
+      "static index/hash validation",
+      "saved-PCD grid export and asset bundle"
+    ]
+  },
+  "limits": [
+    "Synthetic/PTY MCU validation only; no physical motor or MID360 measurements.",
+    "Safety zero hold takes priority over ordinary target acceleration/jerk limits.",
+    "New MCU byte protocol, physical response identification and braking validation remain pending."
+  ]
+}

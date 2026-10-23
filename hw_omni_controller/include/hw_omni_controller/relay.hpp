@@ -43,7 +43,10 @@ public:
     if(!session_){out.reason="No navigation lease";return out;}
     out.lease=session_->lease;out.sequence=++sequence_;
     auto stop=[&](const std::string& why){out.reason=why;return out;};
-    if(!fresh(now,session_->stamp,.2)||!session_->enabled)return stop("Navigation session inactive or stale");
+    if(!fresh(now,session_->stamp,.2)||!session_->enabled){
+      if(now-session_->stamp>.4)out.lease.clear(); // Do not renew an orphan UART lease forever with zeros.
+      return stop("Navigation session inactive or stale");
+    }
     if(!feedback.ready(now))return stop("Actual chassis feedback unavailable");
     if(feedback.sample()->authority_epoch!=session_->authority_epoch)return stop("Hardware authority changed");
     if(!localized||!fresh(now,localization_stamp,.5)||localization_speed<=0)return stop("Map localization unavailable");
@@ -71,7 +74,7 @@ private:
     for(auto& obstacle:aligned)obstacle.age=std::max(0.0,now-prediction_stamp);
     try{
       for(double t=0;t<=horizon+dt*.5;t+=dt){
-        U p=position+t*velocity;if(grid.at(p)>=253)return false;
+        U p=position+t*velocity;if(grid.at(p)>=253||!grid.body_known(p,radius+speed*dt*.5))return false;
         for(const auto& obstacle:aligned){
           if(obstacle.distance(p,t).first<=radius)return false;
         }

@@ -83,7 +83,15 @@ def main():
     from ament_index_python.packages import get_package_prefix
     def native(name):return Path(get_package_prefix('shaoshao_hw_runtime'))/'lib/shaoshao_hw_runtime'/name
     runtime=Path(os.environ['SHAOSHAO_HW_RUNTIME']);runtime.mkdir(parents=True,exist_ok=True)
-    if not (runtime/'shaoshao').exists():(runtime/'shaoshao').symlink_to(SOURCE,target_is_directory=True)
+    # Editable test checkout: never modify the real vehicle configuration.
+    shadow=runtime/'test-source';(shadow/'web_panel').mkdir(parents=True,exist_ok=True)
+    robot=shadow/'web_panel/robot.yaml';robot.write_text((SOURCE/'web_panel/robot.yaml').read_text())
+    for name in ['index.html','stream.js','navcar_move.html','navcar_translation.xml']:
+        path=shadow/'web_panel'/name
+        if not path.exists():path.symlink_to(SOURCE/'web_panel'/name)
+    for name in ['sentry_bringup','deployment']:
+        if not (shadow/name).exists():(shadow/name).symlink_to(SOURCE/name,target_is_directory=True)
+    if not (runtime/'shaoshao').exists():(runtime/'shaoshao').symlink_to(shadow,target_is_directory=True)
     subprocess.run([str(native('hw_runtime')),'configure',str(SOURCE),str(runtime)],check=True)
     maps=runtime/'synthetic_map'
     points=make_bundle(maps)
@@ -153,10 +161,23 @@ def main():
         start('move',[str(native('hw_move_web')),'--runtime',str(runtime),'--hw-ros','--config',str(serial_config),
                       '--robot-config',str(SOURCE/'web_panel/robot.yaml')])
         wait_for(lambda:api(8081,'/api/state')['connected'],10,'Native MCU connection')
+        for i in range(65):
+            api(8081,'/api/command',dict(action='stop',client='capacity-'+str(i),seq=1,strength=None))
+        orphan=api(8081,'/api/navigation/acquire',{})['lease']
+        api(8081,'/api/navigation/command',dict(lease=orphan,seq=1,forward=0.,left=0.))
+        wait_for(lambda:api(8081,'/api/state')['control_source']=='manual',3,'Orphan UART lease expires with healthy MCU feedback')
+        replacement=api(8081,'/api/navigation/acquire',{})['lease']
+        assert replacement!=orphan
+        api(8081,'/api/navigation/release',{'lease':replacement})
         start('web',[str(native('hw_supervisor')),'--runtime',str(runtime),'--maps-dir',str(maps)])
         wait_for(lambda:api(8080,'/api/state'),10,'Web startup')
+        updated=yaml.safe_load(robot.read_text());updated['navigation']['max_speed_mps']=.25
+        robot.write_text(yaml.safe_dump(updated))
         api(8080,'/api/mode',{'mode':'navigation'})
         state=wait_for(lambda:(s if (s:=api(8080,'/api/state'))['navigation']['ready'] else None),50,'Global registration / Nav2 activation')
+        active=yaml.safe_load((runtime/'active_robot.yaml').read_text())
+        params=yaml.safe_load((runtime/'navigation_runtime/nav2.yaml').read_text())
+        assert active['navigation']['max_speed_mps']==.25 and params['controller_server']['ros__parameters']['FollowPath']['max_speed_mps']==.25
         recovered=state['navigation']['pose']
         expected=transform(np.array([[.00318,-.02329,0.]]),truth)[0]
         assert np.linalg.norm([recovered['x']-expected[0],recovered['y']-expected[1]])<.06,(recovered,expected)
@@ -205,10 +226,21 @@ def main():
         wait_for(lambda:api(8080,'/api/state')['navigation']['status']=='succeeded',30,'Explicit goal arrival and stop')
         time.sleep(.3)
         assert math.hypot(mcu.commands[-1][1],mcu.commands[-1][2])<1e-5,'Arrival must release motion'
+        api(8080,'/api/mode',{'mode':'idle'})
+        wait_for(lambda:(s:=api(8080,'/api/state'))['mode']=='idle' and not s['switching'],20,'Navigation stack stops')
+        updated=yaml.safe_load(robot.read_text());updated['navigation']['max_speed_mps']=.15;updated['navigation']['mpc']['tau_x_s']=.4
+        robot.write_text(yaml.safe_dump(updated));api(8080,'/api/mode',{'mode':'navigation'})
+        state=wait_for(lambda:(s if (s:=api(8080,'/api/state'))['navigation']['ready'] else None),50,'Reloaded navigation stack activates')
+        params=yaml.safe_load((runtime/'navigation_runtime/nav2.yaml').read_text())
+        follow=params['controller_server']['ros__parameters']['FollowPath']
+        assert follow['max_speed_mps']==.15 and follow['tau_x_s']==.4,'Mode restart kept stale MPC config'
+        position=state['navigation']['pose'];api(8080,'/api/navigation/goal',{'x':position['x']+.12,'y':position['y'],'map_revision':api(8080,'/api/map')['revision']})
+        wait_for(lambda:api(8080,'/api/state')['navigation']['status']=='succeeded',30,'Reloaded limits permit goal arrival')
+        assert api(8081,'/api/state')['navigation_max_speed_mps']==.15,'UART used stale safety limit'
         result={'global_pose_error_m':float(np.linalg.norm([recovered['x']-expected[0],recovered['y']-expected[1]])),
                 'native_commands':len(mcu.commands),'max_command_speed_mps':max(math.hypot(c[1],c[2]) for c in mcu.commands),
                 'checks':['automatic unknown-pose GICP','FDDP activation','time-indexed predictions','synthetic measured feedback','Web preview/goal','native CRC/ACK transport',
-                          'localization loss stops','automatic replan/resume','explicit retry RPC and resume','manual takeover revokes lease','new explicit goal reaches target and stops']}
+                          'localization loss stops','automatic replan/resume','explicit retry RPC and resume','manual takeover revokes lease','new explicit goal reaches target and stops','65-page stop capacity','orphan lease expires and reacquires','mode switch reloads MPC and UART limits']}
         (runtime/'integration-result.json').write_text(json.dumps(result,indent=2))
         print(json.dumps(result),flush=True)
     except Exception:

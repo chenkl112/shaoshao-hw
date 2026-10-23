@@ -115,6 +115,12 @@ geometry_msgs::msg::TwistStamped Controller::computeVelocityCommands(const geome
   if(last_output_.nanoseconds()!=0&&(elapsed<0.025||elapsed>0.10))return fail("Control timing discontinuity");
   U previous=rotation(yaw)*previous_command_;
   U increment=rotation(yaw)*previous_increment_;
+  if(speed_limit_hold(speed_limit_,previous,measured)){
+    previous_command_.setZero();previous_increment_.setZero();last_output_=now;
+    geometry_msgs::msg::TwistStamped stopped;stopped.header.frame_id=base_;stopped.header.stamp=now;
+    std_msgs::msg::String status;status.data="{\"ready\":false,\"reason\":\"Speed limit braking hold\"}";status_pub_->publish(status);
+    return stopped; // Safety stop: retain the plan and authority, not a Nav2 fault.
+  }
   Problem problem;problem.settings=settings_;problem.settings.speed=speed_limit_;
   // Construct references from the closest segment, not the closest vertex.
   std::vector<U> points;std::vector<double> cumulative{0};

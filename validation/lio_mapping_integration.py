@@ -75,6 +75,7 @@ def main():
             raise AssertionError(last)
         if supervised:
             wait_state(lambda s:s['mode']=='idle',10)
+            api('/api/mapping/filter',{'enabled':True,'height_m':2.0,'dynamic_enabled':True})
             api('/api/mode',{'mode':'mapping'})
             state=wait_state(lambda s:s['mode']=='mapping' and not s['switching'],15)
             assert not state['error'],state
@@ -131,6 +132,12 @@ def main():
             state=wait_state(lambda s:s['mode']=='idle' and not s['switching'],45)
             assert not state['error'] and state['mapping_control']['saved'],state
             assert api('/api/map')['available'],'C++ panel did not save the 2D map'
+            bundle=json.loads((maps/'bundle.json').read_text())
+            import hashlib
+            metadata=yaml.safe_load((maps/'site.yaml').read_text())
+            assert metadata['image'].startswith('site-snapshot-'),'Save must project the exact saved PCD'
+            for key,path in [('pcd_sha256',maps/'site.pcd'),('yaml_sha256',maps/'site.yaml'),('image_sha256',maps/metadata['image'])]:
+                assert bundle[key]==hashlib.sha256(path.read_bytes()).hexdigest(),key
             saved='Native manager saved PCD and 2D PNG';indexed='Native manager finalized index'
         else:
             saved=call('/map_save');indexed=call('/hw/finalize_index')
@@ -138,7 +145,7 @@ def main():
         result={'synthetic':True,'scans_sent':sent,'lio_outputs':len(outputs),
                 'cruise_velocity_mps':speed,'expected_velocity_mps':.08,
                 'supervised_modes':supervised,'map_save':saved,'index_finalize':indexed,'checks':['native LIO velocity','finite PSD covariance',
-                'body cloud','actual ROS recorder','PCD save','static index/hash validation']}
+                'body cloud','actual ROS recorder','PCD save','static index/hash validation','saved-PCD grid export and asset bundle' if supervised else 'direct stack services']}
         (runtime/'result.json').write_text(json.dumps(result,indent=2));print(json.dumps(result))
     finally:
         if process.poll() is None:

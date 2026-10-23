@@ -19,6 +19,7 @@ public:
     executor_.add_node(node_);
     save_map_ = node_->create_client<std_srvs::srv::Trigger>("/map_save");
     finalize_index_ = node_->create_client<std_srvs::srv::Trigger>("/hw/finalize_index");
+    export_grid_ = node_->create_client<std_srvs::srv::Trigger>("/hw/export_grid");
     retry_localization_ = node_->create_client<std_srvs::srv::Trigger>("/hw/localization/retry");
     manager_.trigger = [this](const std::string& service) { trigger(service); };
     tasks_.hooks.mode = [this](const std::string& mode) { request_mode(mode); };
@@ -34,7 +35,16 @@ public:
       return tasks_.dispatch(request, steady());
     });
     launch_web();
-    spin_ = std::jthread([this] { executor_.spin(); });
+    spin_ = std::jthread([this] {
+      while(rclcpp::ok()&&!executor_stopping_){
+        try{executor_.spin();break;}
+        catch(const std::exception& e){
+          std::lock_guard<std::recursive_mutex> lock(tasks_.mutex);
+          tasks_.cancel();tasks_.error=std::string("ROS 回调失败，输出已禁用：")+e.what();
+          RCLCPP_ERROR(node_->get_logger(),"%s",tasks_.error.c_str());
+        }
+      }
+    });
     polling_ = std::jthread([this](std::stop_token stop) {
       while (!stop.stop_requested()) {
         navigation_->poll_serial();
@@ -50,7 +60,7 @@ public:
     polling_.request_stop();
     if (polling_.joinable()) polling_.join();
     if (transition_.joinable()) transition_.join();
-    executor_.cancel();
+    executor_stopping_=true;executor_.cancel();
     if (spin_.joinable()) spin_.join();
     navigation_.reset();
     executor_.remove_node(node_);
@@ -77,11 +87,12 @@ private:
   std::jthread spin_;
   std::jthread transition_;
   std::atomic_bool transition_running_{false};
+  std::atomic_bool executor_stopping_{false};
   Process web_;
   std::mutex transition_mutex_, manager_mutex_;
   std::jthread polling_;
   std::unique_ptr<Navigation> navigation_;
-  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr save_map_, finalize_index_, retry_localization_;
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr save_map_, finalize_index_, export_grid_, retry_localization_;
   std::unique_ptr<RPCServer> rpc_;
 
   void launch_web() {
@@ -149,6 +160,7 @@ private:
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr client;
     if (name == "/map_save") client = save_map_;
     else if (name == "/hw/finalize_index") client = finalize_index_;
+    else if (name == "/hw/export_grid") client = export_grid_;
     else if (name == "/hw/localization/retry") client = retry_localization_;
     else throw std::invalid_argument("Unknown ROS trigger service");
     if (!client->wait_for_service(std::chrono::seconds(2)))

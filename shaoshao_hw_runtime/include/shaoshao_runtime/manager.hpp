@@ -10,12 +10,13 @@ class Manager {
 public:
   fs::path runtime,source,maps,maps_base;Config config;bool saved=false;
   std::function<void(const std::string&)> trigger;
-  Manager(fs::path root,fs::path initial,bool restore_existing=true):runtime(fs::absolute(root)),source(runtime/"shaoshao"),maps(fs::absolute(initial)),maps_base(maps.parent_path()),config(source/"web_panel/robot.yaml"){
+  Manager(fs::path root,fs::path initial,bool restore_existing=true):runtime(fs::absolute(root)),source(runtime/"shaoshao"),maps(fs::absolute(initial)),maps_base(maps.parent_path()),config(robot_configuration(runtime)){
     fs::create_directories(maps);fs::create_directories(runtime);if(restore_existing){restore("mapping",mapping_);restore("navigation",navigation_);}
   }
   ~Manager(){if(mapping_)mapping_->detach();} // A failed save must never stop mapping in a destructor.
   bool mapping_running(){return mapping_&&mapping_->running();}bool navigation_running(){return navigation_&&navigation_->running();}
   std::string mode(){return navigation_running()?"navigation":mapping_running()?"mapping":"idle";}
+  void reload_config(){Config next(source/"web_panel/robot.yaml");write_yaml(runtime/"active_robot.yaml",next.yaml);config=std::move(next);}
   void transition(const std::string& target){
     if(target=="idle"){stop_navigation();stop_mapping();}
     else if(target=="mapping"){stop_navigation();start_mapping();}
@@ -27,12 +28,17 @@ public:
     if(!mapping_running())return;if(!trigger)throw std::runtime_error("Map save services unavailable");
     auto file=maps/"site.pcd";auto before=fs::exists(file)?std::optional(fs::last_write_time(file)):std::nullopt;
     trigger("/map_save");if(!fs::is_regular_file(file)||!fs::file_size(file)||(before&&fs::last_write_time(file)==*before))throw std::runtime_error("PCD 未更新，建图保持运行");
+    auto old_revision=saved_map(maps).info["revision"];auto pcd_hash=sha256(file);
+    trigger("/hw/export_grid");
     if(!saved_map_available())throw std::runtime_error("二维地图尚未生成，建图保持运行");
+    if(saved_map(maps).info["revision"]==old_revision||sha256(file)!=pcd_hash)throw std::runtime_error("二维地图未对应当前 PCD 导出，建图保持运行");
     trigger("/hw/finalize_index");RetrievalIndex verify(maps/"keyframes",file);
-    mapping_->stop(15);mapping_.reset();atomic_write(runtime/"mapping.pid","0\n");saved=true;
+    mapping_->stop(15);mapping_.reset();atomic_write(runtime/"mapping.pid","0\n");
+    auto image=saved_map(maps).image;Json::Value bundle;bundle["pcd_sha256"]=pcd_hash;bundle["yaml_sha256"]=sha256(maps/"site.yaml");bundle["image_sha256"]=sha256(image);write_json(maps/"bundle.json",bundle);saved=true;
   }
   void start_mapping(){
     if(mapping_running())return;
+    reload_config();
     auto filter=mapping_filter(maps);auto count=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     auto next=maps_base/("mid360_mapping_"+std::to_string(count));fs::create_directories(next);write_json(next/"mapping_filter.json",filter);
     write_yaml(runtime/"mapping_runtime/fast_lio.yaml",mapping_configuration(source,next,config));
@@ -43,7 +49,11 @@ public:
   }
   Json::Value start_navigation(){
     if(navigation_running())return read_frames();RetrievalIndex verify(maps/"keyframes",maps/"site.pcd");
-    auto frames=navigation_configuration(runtime,maps,config);
+    if(fs::exists(maps/"bundle.json")){
+      auto bundle=read_json(maps/"bundle.json");auto image=saved_map(maps).image;
+      if(bundle["pcd_sha256"].asString()!=sha256(maps/"site.pcd")||bundle["yaml_sha256"].asString()!=sha256(maps/"site.yaml")||image.empty()||bundle["image_sha256"].asString()!=sha256(image))throw std::runtime_error("地图 PCD/PNG/YAML 快照校验失败");
+    }
+    reload_config();auto frames=navigation_configuration(runtime,maps,config);
     auto process=Process::spawn({executable(runtime,"shaoshao_hw_runtime","hw_stack").string(),"--runtime",runtime.string(),"--role","navigation","--maps-dir",maps.string()},runtime/"navigation.log");
     wait_started(process,2);navigation_=std::move(process);persist("navigation",*navigation_);return frames;
   }

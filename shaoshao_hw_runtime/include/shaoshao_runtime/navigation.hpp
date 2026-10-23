@@ -27,7 +27,7 @@ class Navigation {
 public:
   Navigation(rclcpp::Node::SharedPtr node,Tasks& tasks,fs::path root)
       :node_(std::move(node)),tasks_(tasks),root_(std::move(root)),
-       config_(root_/"shaoshao/web_panel/robot.yaml"),gate_(config_.feedback_timeout),
+       config_(robot_configuration(root_)),gate_(config_.feedback_timeout),
        buffer_(node_->get_clock()),listener_(buffer_){
     navigator_=rclcpp_action::create_client<Navigate>(node_,"/navigate_to_pose");
     planner_=rclcpp_action::create_client<Plan>(node_,"/compute_path_to_pose");
@@ -65,7 +65,7 @@ public:
     });
     map_=node_->create_subscription<nav_msgs::msg::OccupancyGrid>("/projected_map",rclcpp::QoS(1).transient_local(),[this](nav_msgs::msg::OccupancyGrid::SharedPtr msg){
       std::lock_guard<std::recursive_mutex> lock(tasks_.mutex);
-      if(tasks_.mode!="mapping"||!fresh(node_->now().seconds(),msg->header.stamp,2)||msg->header.frame_id!="map")return;
+      if(tasks_.mode!="mapping"||tasks_.switching||!fresh(node_->now().seconds(),msg->header.stamp,2)||msg->header.frame_id!="map")return;
       try{auto origin=ros_pose(msg->info.origin);save_grid(tasks_.maps,msg->info.width,msg->info.height,msg->info.resolution,
             Point(origin.translation().x(),origin.translation().y(),std::atan2(origin.linear()(1,0),origin.linear()(0,0))),msg->data);}
       catch(const std::exception& e){RCLCPP_WARN(node_->get_logger(),"Grid save: %s",e.what());}
@@ -95,13 +95,13 @@ public:
   }
   ~Navigation(){release();}
   // Called with Tasks locked, after a mode transition completed.
-  void reset(){++mode_epoch_;startup_=false;quality_at_=0;tasks_.costmap["available"]=false;tasks_.motion=Json::Value();release();}
+  void reset(){++mode_epoch_;startup_=false;quality_at_=0;goal_handle_.reset();tasks_.costmap["available"]=false;tasks_.motion=Json::Value();release();Config next(robot_configuration(root_));config_=std::move(next);gate_=hw_omni::FeedbackGate(config_.feedback_timeout);}
 private:
   rclcpp::Node::SharedPtr node_;Tasks& tasks_;fs::path root_;Config config_;hw_omni::FeedbackGate gate_;
   tf2_ros::Buffer buffer_;tf2_ros::TransformListener listener_;
   rclcpp_action::Client<Navigate>::SharedPtr navigator_;rclcpp_action::Client<Plan>::SharedPtr planner_;
   rclcpp::Client<nav2_msgs::srv::ManageLifecycleNodes>::SharedPtr lifecycle_;
-  GoalHandle::SharedPtr goal_handle_;std::string lease_;std::optional<uint64_t> manual_epoch_;
+  GoalHandle::SharedPtr goal_handle_;std::string lease_;std::optional<uint64_t> manual_epoch_;uint64_t lease_revision_=0;
   double quality_at_=0,goal_stamp_=0;bool startup_=false;uint64_t mode_epoch_=0;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
   rclcpp::Publisher<shaoshao_hw_interfaces::msg::NavigationSession>::SharedPtr session_pub_;
@@ -115,18 +115,20 @@ public:
   // HTTP polling runs outside the ROS executor so a slow UART service cannot
   // delay feedback or task heartbeats.
   void poll_serial(){
+    uint64_t revision;{std::lock_guard<std::recursive_mutex> lock(tasks_.mutex);revision=lease_revision_;}
     try{
       auto v=request("/api/state");std::lock_guard<std::recursive_mutex> lock(tasks_.mutex);
+      if(revision!=lease_revision_)return; // Snapshot predates a lease acquire/release.
       tasks_.serial_ready=v["connected"].asBool()&&v["error"].asString().empty();tasks_.serial_at=steady();
       uint64_t epoch=v["manual_epoch"].asUInt64();bool changed=manual_epoch_&&*manual_epoch_!=epoch;manual_epoch_=epoch;
       if(changed||(!lease_.empty()&&v["control_source"].asString()!="navigation")){tasks_.cancel();tasks_.clear_resume();release();}
-    }catch(const std::exception&){std::lock_guard<std::recursive_mutex> lock(tasks_.mutex);tasks_.serial_ready=false;if(tasks_.active())tasks_.cancel();}
+    }catch(const std::exception&){std::lock_guard<std::recursive_mutex> lock(tasks_.mutex);if(revision!=lease_revision_)return;tasks_.serial_ready=false;if(tasks_.active())tasks_.cancel();}
   }
 private:
   Json::Value request(const std::string& path,const std::optional<Json::Value>& body=std::nullopt){
     auto token=read_text(root_/"navcar_move.token",1024);while(!token.empty()&&std::isspace(static_cast<unsigned char>(token.back())))token.pop_back();return local_http(8081,token,path,body);
   }
-  void release(){if(lease_.empty())return;Json::Value body;body["lease"]=lease_;lease_.clear();try{request("/api/navigation/release",body);}catch(const std::exception&) {}}
+  void release(){if(lease_.empty())return;Json::Value body;body["lease"]=lease_;lease_.clear();++lease_revision_;try{request("/api/navigation/release",body);}catch(const std::exception&) {}}
   geometry_msgs::msg::PoseStamped target(const Json::Value& v){geometry_msgs::msg::PoseStamped p;p.header.frame_id="map";p.header.stamp=node_->now();p.pose=to_ros(pose(v["x"].asDouble(),v["y"].asDouble(),v.get("yaw",0.).asDouble()));return p;}
   void plan(uint64_t id,const Json::Value& goal){
     if(!planner_->action_server_is_ready())throw std::runtime_error("路径规划服务未就绪");
@@ -141,7 +143,9 @@ private:
   }
   void navigate(uint64_t id,const Json::Value& goal){
     if(!navigator_->action_server_is_ready())throw std::runtime_error("导航服务未就绪");
-    release();lease_=request("/api/navigation/acquire",Json::Value(Json::objectValue))["lease"].asString();
+    release();Json::Value acquire(Json::objectValue);if(manual_epoch_)acquire["manual_epoch"]=Json::UInt64(*manual_epoch_);
+    auto acquired=request("/api/navigation/acquire",acquire);lease_=acquired["lease"].asString();++lease_revision_;
+    if(acquired["manual_epoch"].isUInt64())manual_epoch_=acquired["manual_epoch"].asUInt64();
     if(lease_.empty())throw std::runtime_error("控制器未返回导航控制权");
     Navigate::Goal g;g.pose=target(goal);goal_stamp_=seconds(g.pose.header.stamp);
     rclcpp_action::Client<Navigate>::SendGoalOptions options;
@@ -156,7 +160,7 @@ private:
       auto code=result.code;tasks_.goal_result(id,code==rclcpp_action::ResultCode::SUCCEEDED?"succeeded":code==rclcpp_action::ResultCode::CANCELED?"canceled":"failed",code==rclcpp_action::ResultCode::SUCCEEDED?"已到达目标":code==rclcpp_action::ResultCode::CANCELED?"导航已取消":"导航失败");goal_handle_.reset();release();};
     try{navigator_->async_send_goal(g,options);}catch(...){release();throw;}
   }
-  void cancel(){if(goal_handle_)navigator_->async_cancel_goal(goal_handle_);}
+  void cancel(){if(goal_handle_)try{navigator_->async_cancel_goal(goal_handle_);}catch(const rclcpp_action::exceptions::UnknownGoalHandleError&){goal_handle_.reset();}}
   void odom(nav_msgs::msg::Odometry msg,bool navigation){
     std::lock_guard<std::recursive_mutex> lock(tasks_.mutex);
     if(tasks_.mode!=(navigation?"navigation":"mapping")||tasks_.switching||!fresh(node_->now().seconds(),msg.header.stamp,.5)||msg.header.frame_id!=(navigation?"navcar_odom":"odom"))return;

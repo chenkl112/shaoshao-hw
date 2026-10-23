@@ -118,9 +118,11 @@ endif()
 ament_target_dependencies(fastlio_mapping ${dependencies})
 
 add_executable(static_map_projector src/static_map_projector.cpp)
+find_package(PNG REQUIRED)
+find_package(yaml-cpp REQUIRED)
 target_include_directories(static_map_projector PRIVATE include ${PCL_INCLUDE_DIRS})
-target_link_libraries(static_map_projector ${PCL_LIBRARIES})
-ament_target_dependencies(static_map_projector rclcpp nav_msgs sensor_msgs pcl_conversions)
+target_link_libraries(static_map_projector ${PCL_LIBRARIES} PNG::PNG yaml-cpp)
+ament_target_dependencies(static_map_projector rclcpp nav_msgs sensor_msgs std_srvs pcl_conversions)
 
 # ---------------- Install --------------- #
 install(TARGETS fastlio_mapping static_map_projector

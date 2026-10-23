@@ -85,7 +85,23 @@ void full_rollout_speed(){
   }
   require((x.head<2>()-U(1.,.4)).norm()<.08,"Constrained oblique path must make progress");
 }
+void unknown_body_and_speed_transition(){
+  Grid grid;grid.width=160;grid.height=160;grid.resolution=.025;grid.origin=U(-2,-2);grid.cells.assign(25600,255);
+  for(int y=76;y<=83;++y)for(int x=0;x<160;++x)grid.cells[y*160+x]=0;
+  for(int y=64;y<96;++y)for(int x=64;x<96;++x)grid.cells[y*160+x]=0;
+  auto p=reference(U(.5,0));p.grid=&grid;
+  require(grid.body_known(U::Zero(),p.settings.radius),"Initial whole body is known");
+  require(!grid.body_known(U(.3,0),p.settings.radius),"Known center is not sufficient when body overlaps unknown");
+  auto result=solve(p,X::Zero());
+  if(result.valid)for(const auto& state:result.states)require(grid.body_known(state.head<2>(),p.settings.radius),"Every accepted rollout must keep the entire body known");
+  require(!grid.body_known(U(1.9,0),p.settings.radius),"Body crossing costmap boundary must be blocked");
+  require(speed_limit_hold(.05,U(.3,0),U(.3,0)),"Reduced speed cap starts safety braking hold");
+  require(speed_limit_hold(.05,U::Zero(),U(.1,0)),"Hold waits for actual speed, not only the zero target");
+  require(!speed_limit_hold(.05,U::Zero(),U(.04,0)),"Settled vehicle can re-enter MPC under reduced limit");
+  auto slow=reference(U(.5,0));slow.settings.speed=.05;X initial=X::Zero();initial[2]=.04;
+  require(solve(slow,initial).valid,"Zero command history after hold permits feasible degraded-speed MPC");
+}
 int main(){
-  try{dynamics_and_cost_derivatives();closed_loop(U(.5,0));closed_loop(U(0,.5));closed_loop(U(.35,.35));predictions_and_collisions();predictive_avoidance();full_rollout_speed();std::cout<<"All native MPC tests passed\n";}
+  try{dynamics_and_cost_derivatives();closed_loop(U(.5,0));closed_loop(U(0,.5));closed_loop(U(.35,.35));predictions_and_collisions();predictive_avoidance();full_rollout_speed();unknown_body_and_speed_transition();std::cout<<"All native MPC tests passed\n";}
   catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

@@ -8,20 +8,20 @@ int main(int argc,char** argv){
     fs::path root=runtime_path(),maps;std::string role;
     for(int i=1;i<argc;++i){std::string name=argv[i];if(i+1>=argc)throw std::invalid_argument("Missing stack argument");std::string value=argv[++i];if(name=="--runtime")root=value;else if(name=="--role")role=value;else if(name=="--maps-dir")maps=value;else throw std::invalid_argument("Unknown stack argument");}
     if(maps.empty()||(role!="mapping"&&role!="navigation"))throw std::invalid_argument("Provide stack --role and --maps-dir");
-    std::signal(SIGINT,stop);std::signal(SIGTERM,stop);Config config(root/"shaoshao/web_panel/robot.yaml");std::vector<Process> children;auto logfile=root/(role+".log");
+    std::signal(SIGINT,stop);std::signal(SIGTERM,stop);Config config(robot_configuration(root));std::vector<Process> children;auto logfile=root/(role+".log");
     auto launch=[&](const std::string& package,const std::string& binary,const std::string& node,const std::vector<std::string>& parameters){
       std::vector<std::string> command{executable(root,package,binary).string(),"--ros-args","-r","__node:="+node};command.insert(command.end(),parameters.begin(),parameters.end());children.push_back(Process::spawn(command,logfile,false));
     };
     auto frame=[&](const std::string& name,const std::string& parent,const std::string& child,const Point& point){
       std::vector<std::string> command{executable(root,"tf2_ros","static_transform_publisher").string(),"--frame-id",parent,"--child-frame-id",child,"--x",std::to_string(point.x()),"--y",std::to_string(point.y()),"--z",std::to_string(point.z()),"--yaw","0","--pitch","0","--roll","0","--ros-args","-r","__node:="+name};children.push_back(Process::spawn(command,logfile,false));
     };
-    auto common=std::vector<std::string>{"-p","config_path:="+(root/"shaoshao/web_panel/robot.yaml").string(),"-p","maps_dir:="+maps.string(),"-p","runtime_root:="+root.string()};
+    auto common=std::vector<std::string>{"-p","config_path:="+robot_configuration(root).string(),"-p","maps_dir:="+maps.string(),"-p","runtime_root:="+root.string()};
     if(role=="mapping"){
       launch("shaoshao_hw_runtime","index_recorder","hw_index_recorder",common);
       launch("fast_lio","fastlio_mapping","laserMapping",{"--params-file",(root/"mapping_runtime/fast_lio.yaml").string(),"-r","/Odometry:=/state_estimation"});
       launch("terrain_analysis_ext","terrainAnalysisExt","terrainAnalysisExt",{"--params-file",(root/"mapping_runtime/terrain.yaml").string(),"-r","/registered_scan:=/cloud_registered"});
       frame("mapping_map_odom","map","odom",Point::Zero());
-      launch("fast_lio","static_map_projector","static_map_projector",{"-p","resolution:="+std::to_string(config.resolution)});
+      launch("fast_lio","static_map_projector","static_map_projector",{"-p","resolution:="+std::to_string(config.resolution),"-p","map_path:="+(maps/"site.pcd").string()});
     }else{
       auto params=(root/"navigation_runtime/nav2.yaml").string();auto frames=YAML::LoadFile((root/"navigation_runtime/frames.yaml").string());
       launch("fast_lio","fastlio_mapping","navigation_lio",{"--params-file",(root/"navigation_runtime/fast_lio.yaml").string(),"-r","/Odometry:=/navcar/state_estimation"});

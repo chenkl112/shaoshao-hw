@@ -5,6 +5,7 @@
 #include "shaoshao_runtime/process.hpp"
 #include "shaoshao_runtime/serial.hpp"
 #include "shaoshao_runtime/tasks.hpp"
+#include "shaoshao_runtime/manager.hpp"
 #include <iostream>
 #include <random>
 
@@ -51,12 +52,17 @@ void uart(){
 void configurations(const fs::path& root,const fs::path& source){
   auto runtime=root/"runtime";fs::create_directories(runtime);fs::create_directory_symlink(source,runtime/"shaoshao");configure_runtime(source,runtime);Config config(source/"web_panel/robot.yaml");
   auto maps=root/"new-map";fs::create_directories(maps);write_yaml(runtime/"mapping_runtime/fast_lio.yaml",mapping_configuration(source,maps,config));
+  Json::Value filter;filter["enabled"]=true;filter["dynamic_enabled"]=true;filter["height_m"]=2.0;write_json(maps/"mapping_filter.json",filter);
+  write_yaml(runtime/"mapping_runtime/fast_lio.yaml",mapping_configuration(source,maps,config));
   auto lio=YAML::LoadFile((runtime/"mapping_runtime/fast_lio.yaml").string());
+  require(lio["/**"]["ros__parameters"]["map_filter"]["max_height"].Scalar()=="2.0","Integral-valued ROS doubles keep their YAML type");
   require(lio["/**"]["ros__parameters"]["mapping"]["extrinsic_R"][0].Scalar()=="1.0", "ROS rotation parameters must retain double_array type");
+  config.yaml["navigation"]["obstacles"]["range_m"]=8;
   atomic_write(maps/"site.yaml","image: site.png\nresolution: 0.025\n");auto frames=navigation_configuration(runtime,maps,config);
   require(std::abs(frames["center_offset"][0].asDouble()-.00318)<1e-8,"Preserve measured reference offset");auto nav=YAML::LoadFile((runtime/"navigation_runtime/nav2.yaml").string());
   require(nav["controller_server"]["ros__parameters"]["FollowPath"]["plugin"].as<std::string>()=="hw_omni_controller::Controller","Native configuration keeps FDDP");require(nav["local_costmap"]["local_costmap"]["ros__parameters"]["global_frame"].as<std::string>()=="map","Native configuration keeps map-frame predictions");
   require(read_text(runtime/"navigation_runtime/nav2.yaml").find("&1")==std::string::npos,"No ROS YAML anchors");
+  require(nav["hw_obstacle_predictor"]["ros__parameters"]["range_m"].Scalar()=="8.0","Integer-valued obstacle settings retain ROS double type");
   atomic_write(maps/"site.yaml","image: site.png\nresolution: 0.05\n");rejects([&]{navigation_configuration(runtime,maps,config);},"Old map resolution cannot silently change");
 }
 void processes(const fs::path& root){
@@ -83,8 +89,74 @@ void tasks(const fs::path& root){
   t.hardware(true,0);t.nav_status="active";t.resume=goal;t.hardware(true,1);
   require(t.nav_status=="canceling"&&!t.resume,"Authority epoch zero is valid: 0 -> 1 must cancel and revoke deferred resume");
 }
+
+void serial_recovery(){
+  using namespace hw_runtime::serial;
+  auto echo=frame(0x81,1,controls(1,{0,0,0,17}).substr(8,16));Controller c;c.receive(echo,10);
+  Json::Value stop;stop["action"]="stop";stop["seq"]=1;
+  for(int i=0;i<64;++i){stop["client"]="page-"+std::to_string(i);c.manual(stop,10+i*.001);}
+  auto lease=c.acquire(10.1);Json::Value command;command["lease"]=lease;command["seq"]=1;command["forward"]=.3;command["left"]=0.;c.navigation_command(command,10.1);
+  stop["client"]="new-page";stop["strength"]=Json::Value();stop["spin_rate"]="invalid input";
+  c.manual(stop,10.11);require(c.lease.empty()&&c.desired(10.11)[0]==0,"New-page emergency stop must bypass capacity and unused movement fields");
+  rejects([&]{c.acquire(10.115,c.manual_epoch-1);},"An acquire issued before manual takeover must not retake control afterward");
+  require(c.clients.size()<=64,"Client LRU stays bounded");
+  lease=c.acquire(10.12);command["lease"]=lease;command["seq"]=1;c.navigation_command(command,10.12);
+  c.receive(echo,10.7);require(c.lease.empty(),"Orphan lease expires despite healthy MCU status");
+  auto next=c.acquire(10.7);require(next!=lease,"New supervisor can acquire after lease TTL");
+  command["seq"]=2;rejects([&]{c.navigation_command(command,10.71);},"Late commands from an expired lease cannot renew authority");
+  command["lease"]=next;command["seq"]=1;c.navigation_command(command,10.72);require(c.desired(10.72)[0]>0,"New lease can start sequence at one");
+  c.tick(100);require(c.clients.size()<64,"Idle clients expire");
+}
+void automatic_retry(const fs::path& root){
+  auto maps=root/"retry-map";save_grid(maps,100,100,.025,Point::Zero(),std::vector<int8_t>(10000,0));
+  Tasks t(maps);t.mode="navigation";t.localized=t.hardware_ready=t.nav_server=t.stack_ready=t.serial_ready=true;t.pose["yaw"]=0;t.localization["state"]="tracking";
+  auto fresh=[&](double at){t.cloud_at=t.odom_at=t.pose_at=t.serial_at=at;};fresh(10);
+  Json::Value goal;goal["x"]=1.;goal["y"]=1.;goal["map_revision"]=saved_map(maps).info["revision"];t.resume=goal;
+  int attempts=0;t.hooks.plan=[&](auto,const auto&){++attempts;throw std::runtime_error("planner unavailable");};
+  t.tick(10);require(t.resume&&attempts==1,"Resume must retain its goal on planner transport failure");
+  t.tick(10.1);require(attempts==1,"Resume transport retry is backed off");
+  t.hooks.plan=[&](auto,const auto&){++attempts;};fresh(15);t.tick(15);
+  t.plan_result(t.plan_generation,{Eigen::Vector2d(1,1)});
+  t.hooks.goal=[](auto,const auto&){throw std::runtime_error("UART lease busy");};t.tick(15.1);
+  require(t.resume&&t.nav_status=="failed","UART acquire failure cannot escape timer or discard the deferred goal");
+  fresh(21);t.tick(21);t.plan_result(t.plan_generation,{Eigen::Vector2d(1,1)});
+  t.hooks.goal=[](auto,const auto&){};t.tick(21.1);require(t.resume&&t.nav_status=="sending","Keep deferred target until asynchronous goal acceptance");
+  t.goal_response(t.goal_generation,false);require(t.resume.has_value(),"Async rejection preserves retry target");
+  fresh(27);t.tick(27);t.plan_result(t.plan_generation,{Eigen::Vector2d(1,1)});t.tick(27.1);t.goal_response(t.goal_generation,true);
+  require(!t.resume&&t.nav_status=="active","Accepted retry clears only its own deferred target");
+  t.hooks.cancel=[](){throw std::runtime_error("action disconnected");};t.cancel();
+  require(!t.enabled(27.1)&&t.nav_status=="canceling","Cancel transport failure must still disable motion");
+}
+void map_snapshot_and_reload(const fs::path& root,const fs::path& source,const fs::path& self){
+  auto runtime=root/"managed",maps=root/"managed-map";fs::create_directories(runtime/"shaoshao/web_panel");
+  auto robot=runtime/"shaoshao/web_panel/robot.yaml";fs::copy_file(source/"web_panel/robot.yaml",robot);
+  save_grid(maps,100,100,.025,Point::Zero(),std::vector<int8_t>(10000,0));
+  Cloud points;for(int i=0;i<1200;++i)points.emplace_back((i%30)*.02,(i/30)*.02,.2+(i%3)*.1);save_pcd(maps/"site.pcd",points);
+  auto child=Process::spawn({self.string(),"--role","mapping"},root/"fake-stack.log");
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));Json::Value session;session["pid"]=child.pid();session["start_ticks"]=Json::UInt64(child.start());session["maps_dir"]=maps.string();write_json(runtime/"mapping-session.json",session);
+  Manager manager(runtime,maps);bool export_fresh=false;
+  manager.trigger=[&](const std::string& name){
+    if(name=="/map_save"){for(auto& p:points)p.z()+=.001;save_pcd(maps/"site.pcd",points);}
+    else if(name=="/hw/export_grid"&&export_fresh)save_grid(maps,100,100,.025,Point::Zero(),std::vector<int8_t>(10000,0));
+    else if(name=="/hw/finalize_index"){IndexWriter writer(maps/"keyframes");writer.add(points,Pose::Identity(),1);writer.finalize(maps/"site.pcd",points);}
+  };
+  rejects([&]{manager.stop_mapping();},"An old 2D export cannot be accepted with a new PCD");
+  require(manager.mapping_running()&&!manager.saved,"Keep mapping alive after stale export failure");
+  export_fresh=true;manager.stop_mapping();require(manager.saved&&fs::exists(maps/"bundle.json"),"Consistent save writes an asset hash bundle");
+  auto bundle=read_json(maps/"bundle.json");require(bundle["pcd_sha256"].asString()==sha256(maps/"site.pcd"),"Bundle binds exact PCD snapshot");
+  atomic_write(maps/"site.yaml",read_text(maps/"site.yaml")+"# changed\n");rejects([&]{manager.start_navigation();},"Do not start navigation with a changed 2D asset");
+  auto changed=YAML::LoadFile(robot.string());changed["navigation"]["max_speed_mps"]=.1;changed["navigation"]["mpc"]["tau_x_s"]=.7;write_yaml(robot,changed);
+  manager.reload_config();Config snapshot(robot_configuration(runtime));
+  require(manager.config.speed==.1&&snapshot.speed==.1&&snapshot.tau_x==.7,"Mode reload publishes one validated configuration snapshot");
+  changed["navigation"]["max_speed_mps"]=-1.;write_yaml(robot,changed);rejects([&]{manager.reload_config();},"Invalid replacement config must be rejected");
+  require(Config(robot_configuration(runtime)).speed==.1,"Rejected reload must preserve the last valid snapshot");
+}
 int main(int argc,char** argv){
+  if(argc==3&&std::string(argv[1])=="--role"){
+    static volatile std::sig_atomic_t stopped=0;std::signal(SIGINT,[](int){stopped=1;});
+    while(!stopped)std::this_thread::sleep_for(std::chrono::milliseconds(10));return 0;
+  }
   if(argc!=2){std::cerr<<"Provide repository root\n";return 2;}auto root=fs::temp_directory_path()/("hw-native-"+std::to_string(getpid()));fs::create_directories(root);
-  try{localization();indices(root);uart();configurations(root,fs::absolute(argv[1]));processes(root);tasks(root);fs::remove_all(root);std::cout<<"Native localization, index, UART, configuration, process and task tests passed\n";}
+  try{localization();indices(root);uart();configurations(root,fs::absolute(argv[1]));processes(root);tasks(root);serial_recovery();automatic_retry(root);map_snapshot_and_reload(root,fs::absolute(argv[1]),fs::absolute(argv[0]));fs::remove_all(root);std::cout<<"Native localization, index, UART, configuration, process and task tests passed\n";}
   catch(const std::exception& e){std::cerr<<e.what()<<"; evidence: "<<root<<'\n';return 1;}
 }

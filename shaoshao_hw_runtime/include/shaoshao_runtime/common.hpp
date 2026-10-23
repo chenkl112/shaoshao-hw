@@ -43,6 +43,7 @@ inline Json::Value read_json(const fs::path& p){return json_parse(read_text(p));
 inline void write_json(const fs::path& p,const Json::Value& v){atomic_write(p,json_text(v)+"\n");}
 inline void write_yaml(const fs::path& p,const YAML::Node& v){YAML::Emitter e;e.SetDoublePrecision(17);e<<v;if(!e.good())throw std::runtime_error("YAML serialization failed");atomic_write(p,std::string(e.c_str())+"\n");}
 inline fs::path runtime_path(){const char* value=std::getenv("SHAOSHAO_HW_RUNTIME");if(value&&*value)return fs::absolute(value);const char* home=std::getenv("HOME");if(!home)throw std::runtime_error("HOME is unavailable");return fs::path(home)/"ccc/shaoshao-hw-runtime";}
+inline fs::path robot_configuration(const fs::path& runtime){auto snapshot=runtime/"active_robot.yaml";return fs::is_regular_file(snapshot)?snapshot:runtime/"shaoshao/web_panel/robot.yaml";}
 inline std::string random_token(){std::array<unsigned char,24> bytes;if(RAND_bytes(bytes.data(),bytes.size())!=1)throw std::runtime_error("Random generator failed");std::ostringstream out;for(auto b:bytes)out<<std::hex<<std::setfill('0')<<std::setw(2)<<int(b);return out.str();}
 inline std::string sha256(const fs::path& path){
   std::ifstream f(path,std::ios::binary);if(!f)throw std::runtime_error("Cannot hash map");

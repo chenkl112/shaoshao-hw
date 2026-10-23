@@ -17,7 +17,7 @@ public:
   bool switching=false,mapping_saved=false,localized=false,nav_server=false,stack_ready=false,serial_ready=false,hardware_ready=false,hardware_seen=false;
   double cloud_at=0,odom_at=0,pose_at=0,serial_at=0,goal_started=0,plan_started=0;uint64_t goal_generation=0,plan_generation=0,hardware_epoch=0;
   Json::Value pose,local_pose,localization,goal,path=Json::Value(Json::arrayValue),plan,remaining,motion,costmap;
-  std::optional<Json::Value> resume;std::optional<uint64_t> resume_plan;double resume_retry_at=0;
+  std::optional<Json::Value> resume;std::optional<uint64_t> resume_plan,resume_goal_generation;double resume_retry_at=0;
   explicit Tasks(fs::path directory):maps(std::move(directory)){fs::create_directories(maps);clear_plan();costmap["available"]=false;}
   std::string reason(double now) const {
     if(switching)return "正在切换运行模式";if(mode!="navigation")return "请先点击顶部“导航”";if(!error.empty())return error;
@@ -29,7 +29,7 @@ public:
   bool active() const{return nav_status=="sending"||nav_status=="active"||nav_status=="canceling";}
   bool enabled(double now) const{return nav_status=="active"&&reason(now).empty();}
   void clear_plan(){++plan_generation;plan=Json::Value(Json::objectValue);plan["status"]="idle";plan["message"]="选点后自动规划路径";plan["goal"]=Json::Value();plan["path"]=Json::Value(Json::arrayValue);path=Json::Value(Json::arrayValue);}
-  void clear_resume(){resume.reset();resume_plan.reset();}
+  void clear_resume(){resume.reset();resume_plan.reset();resume_goal_generation.reset();}
   Json::Value navigation_target(const Json::Value& body) const {
     double x=finite_number(body,"x"),y=finite_number(body,"y");auto map=saved_map(maps).info;
     if(!map["available"].asBool())throw std::runtime_error(map["message"].asString());
@@ -72,13 +72,16 @@ public:
   }
   void goal_response(uint64_t generation,bool accepted){
     std::lock_guard<std::recursive_mutex> lock(mutex);if(generation!=goal_generation)return;
-    if(!accepted){nav_status="rejected";nav_message="导航目标被拒绝";return;}if(nav_status=="canceling"||switching||mode!="navigation"){if(hooks.cancel)hooks.cancel();return;}nav_status="active";nav_message="正在前往目标";
+    if(!accepted){nav_status="rejected";nav_message="导航目标被拒绝";if(resume_goal_generation==generation){resume_plan.reset();resume_goal_generation.reset();resume_retry_at=goal_started+5;}return;}
+    if(nav_status=="canceling"||switching||mode!="navigation"){cancel_safely();return;}
+    nav_status="active";nav_message="正在前往目标";if(resume_goal_generation==generation)clear_resume();
   }
   void goal_result(uint64_t generation,const std::string& status,const std::string& message){std::lock_guard<std::recursive_mutex> lock(mutex);if(generation!=goal_generation)return;nav_status=status;nav_message=message;remaining=Json::Value();}
   void cancel(bool preserve_resume=false){
     if(!preserve_resume)clear_resume();if(!active())return;if(nav_status=="canceling")return;
-    nav_status="canceling";nav_message="正在取消导航…";if(hooks.cancel)hooks.cancel();
+    nav_status="canceling";nav_message="正在取消导航…";cancel_safely();
   }
+  void cancel_safely() noexcept {try{if(hooks.cancel)hooks.cancel();}catch(const std::exception& e){nav_message=std::string("输出已禁用，取消请求失败：")+e.what();}catch(...){nav_message="输出已禁用，取消请求失败";}}
   void hardware(bool ready,uint64_t epoch){
     std::lock_guard<std::recursive_mutex> lock(mutex);bool changed=hardware_seen&&hardware_epoch!=epoch;hardware_seen=true;hardware_ready=ready;hardware_epoch=epoch;
     if(!ready||changed){cancel();clear_resume();}
@@ -92,10 +95,12 @@ public:
     if(nav_status=="sending"&&now-goal_started>10){cancel();nav_message="导航响应超时，已停止输出";}
     if(plan["status"].asString()=="planning"&&now-plan_started>10){++plan_generation;plan["status"]="failed";plan["message"]="路径规划超时";}
     if(resume&&!active()&&reason(now).empty()&&localization["state"].asString()=="tracking"&&now>=resume_retry_at){
-      auto map=saved_map(maps).info;if((*resume)["map_revision"]!=map["revision"]){clear_resume();return;}
-      if(!resume_plan){request_plan(*resume,now);resume_plan=plan_generation;}
-      else if(*resume_plan==plan_generation&&plan["status"].asString()=="ready"){auto target=*resume;clear_resume();request_goal(target,now);}
-      else if(plan["status"].asString()=="failed"){resume_plan.reset();resume_retry_at=now+5;nav_message="定位已恢复，原目标路径暂不可通行";}
+      try{
+        auto map=saved_map(maps).info;if((*resume)["map_revision"]!=map["revision"]){clear_resume();return;}
+        if(!resume_plan){request_plan(*resume,now);resume_plan=plan_generation;}
+        else if(*resume_plan==plan_generation&&plan["status"].asString()=="ready"){auto target=*resume;resume_goal_generation=goal_generation+1;request_goal(target,now);}
+        else if(plan["status"].asString()=="failed"){resume_plan.reset();resume_retry_at=now+5;nav_message="定位已恢复，原目标路径暂不可通行";}
+      }catch(const std::exception& e){resume_plan.reset();resume_goal_generation.reset();resume_retry_at=now+5;nav_message=std::string("自动续行暂不可用，稍后重试：")+e.what();}
     }
   }
   Json::Value state(double now) const {

@@ -64,32 +64,46 @@ public:
   Settings settings;Session session;bool armed=false,spin_enabled=false;
   std::optional<double> yaw;double strength=.1,updated=0,spin_rate=.1,spin_updated=0;
   std::string action="stop",owner,lease;uint64_t manual_epoch=0;std::optional<uint64_t> navigation_sequence;
-  std::map<std::string,uint64_t> clients;Eigen::Vector2d navigation=Eigen::Vector2d::Zero();
+  struct Client {uint64_t sequence;double seen;};
+  std::map<std::string,Client> clients;double lease_updated=0;Eigen::Vector2d navigation=Eigen::Vector2d::Zero();
   bool connected(double now) const{return session.state_time&&now-*session.state_time<.3;}
   bool spin_live(double now) const{return spin_enabled&&now-spin_updated<.2;}
-  void receive(const std::string& bytes,double now){session.receive(bytes,now);if(!yaw&&session.state)yaw=session.state->values[3];}
+  void tick(double now){
+    if(!lease.empty()&&(now-lease_updated>.5||!connected(now)||!session.error.empty()))release(lease);
+    bool owner_live=lease.empty()&&((action!="stop"&&now-updated<.2)||spin_live(now));
+    std::erase_if(clients,[&](const auto& item){return now-item.second.seen>60 && (item.first!=owner||!owner_live);});
+  }
+  void receive(const std::string& bytes,double now){session.receive(bytes,now);if(!yaw&&session.state)yaw=session.state->values[3];tick(now);}
   Json::Value state(double now) const {
     Json::Value s;s["connected"]=connected(now);s["error"]=session.error;s["active"]=armed&&now-updated<.2?action:"stop";s["control_started"]=armed;s["strength"]=strength;s["max_strength"]=settings.max_translation/std::max(settings.forward,settings.left);s["speed_unit"]="m/s";s["navigation_max_speed_mps"]=settings.max_speed;
     s["translation_scale"]["forward"]=settings.forward;s["translation_scale"]["left"]=settings.left;s["control_source"]=lease.empty()?"manual":"navigation";s["manual_epoch"]=Json::UInt64(manual_epoch);s["control_client"]=owner.empty()?Json::Value():Json::Value(owner);
     s["spin"]["enabled"]=spin_live(now);s["spin"]["rate"]=spin_rate;s["spin"]["max_rate"]=settings.max_rot/settings.rot;s["spin"]["unit"]="command";s["yaw_target_deg"]=yaw?Json::Value(*yaw):Json::Value();s["last_ack"]=session.last_ack?Json::Value(*session.last_ack):Json::Value();s["feedback_targets"]=Json::Value();
     if(session.state)for(float value:session.state->values)s["feedback_targets"].append(value);s["feedback_age_s"]=session.state_time?Json::Value(now-*session.state_time):Json::Value();return s;
   }
-  std::string acquire(double now){
+  std::string acquire(double now,std::optional<uint64_t> expected_epoch=std::nullopt){
+    tick(now);
+    if(expected_epoch&&*expected_epoch!=manual_epoch)throw std::runtime_error("人工控制状态已变化，请重新申请导航任务");
     if(!connected(now)||!session.error.empty()||!yaw)throw std::runtime_error("下位机未就绪");
     if(!lease.empty()||spin_live(now)||(action!="stop"&&now-updated<.2))throw std::runtime_error("控制器正在使用，请先停止当前控制");
-    lease=random_token();navigation_sequence.reset();navigation.setZero();action="stop";spin_enabled=false;return lease;
+    lease=random_token();lease_updated=now;navigation_sequence.reset();navigation.setZero();action="stop";spin_enabled=false;return lease;
   }
   void release(const std::string& value){if(!lease.empty()&&value==lease){lease.clear();navigation.setZero();action="stop";updated=0;}}
   void navigation_command(const Json::Value& data,double now){
+    tick(now);
     double x=finite_number(data,"forward"),y=finite_number(data,"left");auto seq=sequence_number(data);
     if(std::hypot(x,y)>settings.max_speed+1e-9)throw std::invalid_argument("导航速度超出范围");
     if(lease.empty()||!data["lease"].isString()||data["lease"].asString()!=lease)throw std::runtime_error("导航控制权已失效");
     if(!connected(now)||!session.error.empty())throw std::runtime_error("下位机未就绪");if(navigation_sequence&&seq<=*navigation_sequence)return;
-    navigation_sequence=seq;spin_enabled=false;navigation<<x,y;action=x||y?"navigation":"stop";updated=now;armed=true;
+    navigation_sequence=seq;lease_updated=now;spin_enabled=false;navigation<<x,y;action=x||y?"navigation":"stop";updated=now;armed=true;
   }
   void manual(const Json::Value& data,double now){
     if(!data["action"].isString())throw std::invalid_argument("需要方向");auto direction=data["action"].asString();
     if(!std::set<std::string>{"forward","backward","left","right","stop"}.contains(direction))throw std::invalid_argument("无效方向");
+    bool stopping=direction=="stop"&&(!data.isMember("spin_enabled")||!boolean(data,"spin_enabled"));
+    if(stopping){
+      if(!accept(data,now,false,true))return;
+      action="stop";navigation.setZero();spin_enabled=false;updated=now;armed=true;return;
+    }
     double speed=finite_number(data,"strength");if(speed<=0||speed>settings.max_translation/std::max(settings.forward,settings.left))throw std::invalid_argument("目标速度超出范围");
     if(direction!="stop"&&data["speed_unit"].asString()!="m/s"&&(settings.forward!=1||settings.left!=1))throw std::invalid_argument("速度单位已更新，请刷新网页");
     bool spin=data.isMember("spin_enabled")?boolean(data,"spin_enabled"):false;double rate=data.isMember("spin_rate")?finite_number(data,"spin_rate"):spin_rate;validate_spin(spin,rate);
@@ -110,8 +124,17 @@ private:
   void validate_spin(bool enabled,double rate) const {if(!std::isfinite(rate)||std::abs(rate)>settings.max_rot/settings.rot||(enabled&&rate==0))throw std::invalid_argument("Invalid independent spin rate");}
   bool accept(const Json::Value& data,double now,bool wants_motion,bool takeover){
     if(!data["client"].isString()||data["client"].asString().empty()||data["client"].asString().size()>80)throw std::invalid_argument("无效控制会话");auto client=data["client"].asString();auto seq=sequence_number(data);
-    if(wants_motion&&(!connected(now)||!session.error.empty()||!yaw))throw std::runtime_error("下位机未就绪");auto it=clients.find(client);if(it!=clients.end()&&seq<=it->second)return false;if(it==clients.end()&&clients.size()>=64)throw std::runtime_error("控制会话已满");
-    bool active=(action!="stop"&&now-updated<.2)||spin_live(now);if(wants_motion&&!takeover&&owner!=client&&active&&lease.empty())throw std::runtime_error("另一个页面正在控制");owner=client;clients[client]=seq;lease.clear();++manual_epoch;return true;
+    if(wants_motion&&(!connected(now)||!session.error.empty()||!yaw))throw std::runtime_error("下位机未就绪");auto it=clients.find(client);if(it!=clients.end()&&seq<=it->second.sequence)return false;
+    tick(now);
+    if(!clients.contains(client)&&clients.size()>=64){
+      auto oldest=clients.end();
+      for(auto candidate=clients.begin();candidate!=clients.end();++candidate){
+        if(candidate->first==owner&&((action!="stop"&&now-updated<.2)||spin_live(now)))continue;
+        if(oldest==clients.end()||candidate->second.seen<oldest->second.seen)oldest=candidate;
+      }
+      if(oldest!=clients.end())clients.erase(oldest);
+    }
+    bool active=(action!="stop"&&now-updated<.2)||spin_live(now);if(wants_motion&&!takeover&&owner!=client&&active&&lease.empty())throw std::runtime_error("另一个页面正在控制");owner=client;clients[client]={seq,now};lease.clear();++manual_epoch;return true;
   }
 };
 }

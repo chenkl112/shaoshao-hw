@@ -17,6 +17,12 @@ using U = Eigen::Vector2d;
 using XX = Eigen::Matrix<double, NX, NX>;
 using XU = Eigen::Matrix<double, NX, NU>;
 using UX = Eigen::Matrix<double, NU, NX>;
+// A reduced hard speed bound cannot be applied to the old command history
+// while also preserving its acceleration/jerk bounds. Enter an explicit zero
+// hold until actual translation settles, then restart MPC from zero targets.
+inline bool speed_limit_hold(double limit,const U& previous,const U& measured){
+  return previous.norm()>limit+1e-7||measured.norm()>limit+.005;
+}
 
 struct Settings {
   // Initial whole-vehicle response assumptions; identify from measured logs.
@@ -91,6 +97,23 @@ struct Grid {
     int x = static_cast<int>(std::floor(c.x())), y = static_cast<int>(std::floor(c.y()));
     if (x < 0 || y < 0 || x >= width || y >= height) return 255;
     return cells[static_cast<size_t>(y)*width+x];
+  }
+  // Lethal obstacles are already inflated by Nav2. Unknown cells are not:
+  // check every cell intersecting the circular body, including map edges.
+  bool body_known(const U& p,double radius) const {
+    if(!p.allFinite()||!std::isfinite(radius)||radius<0||!std::isfinite(resolution)||resolution<=0||!origin.allFinite()||
+       width<=0||height<=0||cells.size()!=size_t(width)*height)return false;
+    U lo=(p-U::Constant(radius)-origin)/resolution;
+    U hi=(p+U::Constant(radius)-origin)/resolution;
+    if(lo.minCoeff()<0||hi.x()>=width||hi.y()>=height)return false;
+    for(int y=int(std::floor(lo.y()));y<=int(std::floor(hi.y()));++y)
+      for(int x=int(std::floor(lo.x()));x<=int(std::floor(hi.x()));++x){
+        if(cells[size_t(y)*width+x]!=255)continue;
+        U lower=origin+resolution*U(x,y),upper=lower+U::Constant(resolution);
+        U nearest=p.cwiseMax(lower).cwiseMin(upper);
+        if((p-nearest).squaredNorm()<=radius*radius+1e-12)return false;
+      }
+    return true;
   }
   std::pair<double, U> sample(const U& p) const {
     U c = (p-origin)/resolution - U::Constant(0.5);
@@ -208,7 +231,8 @@ public:
       for(int n=0;n<=samples;++n){
         double f=static_cast<double>(n)/samples;
         U point=(1-f)*xs[k].head<2>()+f*xs[k+1].head<2>();
-        if(grid && grid->at(point)>=253)return false;
+        double sweep_guard=(xs[k+1].head<2>()-xs[k].head<2>()).norm()/(2*samples);
+        if(grid && (grid->at(point)>=253||!grid->body_known(point,settings.radius+sweep_guard)))return false;
         for(const auto& obstacle:obstacles)
           if(obstacle.distance(point,(k+f)*DT).first<=settings.radius)return false;
       }
