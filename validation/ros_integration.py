@@ -26,7 +26,7 @@ class NativeMCU:
         self.master,self.slave=pty.openpty();tty.setraw(self.slave);os.set_blocking(self.master,False)
         self.port=os.ttyname(self.slave);self.closed=threading.Event();self.lock=threading.Lock()
         self.velocity=np.zeros(2);self.position=np.zeros(2);self.target=np.zeros(2);self.commands=[]
-        self.command_at=0.;self.seq=0;self.thread=threading.Thread(target=self.run,daemon=True);self.thread.start()
+        self.blocked=False;self.command_at=0.;self.seq=0;self.thread=threading.Thread(target=self.run,daemon=True);self.thread.start()
     def run(self):
         buffer=bytearray();previous=time.monotonic();last_state=0.
         while not self.closed.wait(.002):
@@ -51,6 +51,7 @@ class NativeMCU:
             with self.lock:
                 target=self.target if now-self.command_at<.3 else np.zeros(2)
                 self.velocity+=(target-self.velocity)*min(1.,dt/.12)
+                if self.blocked:self.velocity[:]=0
                 self.position+=self.velocity*dt
             if now-last_state>.04:
                 os.write(self.master,frame(STATE,self.seq,struct.pack('<4f',self.target[0]*10,-self.target[1]*10,0,17)));last_state=now
@@ -74,6 +75,7 @@ def main():
     from rclpy.node import Node
     from rclpy.qos import qos_profile_sensor_data
     from nav_msgs.msg import Odometry,OccupancyGrid
+    from std_msgs.msg import String
     from geometry_msgs.msg import TwistStamped
     from sensor_msgs.msg import PointCloud2
     from geometry_msgs.msg import TransformStamped
@@ -116,13 +118,17 @@ def main():
             self.feedback=self.create_publisher(ChassisFeedback,'/hw/chassis_feedback',10)
             self.feedback_seq=0;self.authority_epoch=1;self.control_allowed=True
             self.tf=TransformBroadcaster(self);self.enabled=True;self.prediction_fault=False
-            self.last_grid=None;self.raw_commands=[]
+            self.last_grid=None;self.raw_commands=[];self.controller_states=[]
+            self.create_subscription(String,'/hw/mpc/status',self.controller_status,10)
             self.create_subscription(OccupancyGrid,'/local_costmap/costmap',self.grid,10)
             self.create_subscription(TwistStamped,'/navcar/cmd_vel_auto',lambda m:self.raw_commands.append([m.twist.linear.x,m.twist.linear.y,m.twist.angular.z]),10)
             self.create_timer(.1,self.tick)
             # Independent of LIO availability: localization loss should retain
             # the goal, while actual hardware/manual takeover should revoke it.
             self.create_timer(.02,self.actual_feedback)
+        def controller_status(self,msg):
+            try:self.controller_states.append((time.monotonic(),json.loads(msg.data)))
+            except (ValueError,TypeError):pass
         def grid(self,msg):self.last_grid=msg
         def actual_feedback(self):
             with mcu.lock:velocity=mcu.velocity.copy()
@@ -177,6 +183,8 @@ def main():
         state=wait_for(lambda:(s if (s:=api(8080,'/api/state'))['navigation']['ready'] else None),50,'Global registration / Nav2 activation')
         active=yaml.safe_load((runtime/'active_robot.yaml').read_text())
         params=yaml.safe_load((runtime/'navigation_runtime/nav2.yaml').read_text())
+        assert params['planner_server']['ros__parameters']['GridBased']['plugin']=='hw_omni_controller::Planner'
+        assert params['controller_server']['ros__parameters']['progress_checker']['plugin']=='hw_omni_controller::RecoveryProgressChecker'
         assert active['navigation']['max_speed_mps']==.25 and params['controller_server']['ros__parameters']['FollowPath']['max_speed_mps']==.25
         recovered=state['navigation']['pose']
         expected=transform(np.array([[.00318,-.02329,0.]]),truth)[0]
@@ -202,6 +210,23 @@ def main():
         assert original_arrival_error<.06,original_arrival_error
         time.sleep(.3)
         assert math.hypot(mcu.commands[-1][1],mcu.commands[-1][2])<1e-5
+        # Physically block the synthetic drivetrain while actual feedback remains
+        # healthy. The real C++ controller must reverse, then replan the same goal.
+        current=api(8080,'/api/state')['navigation']['pose']
+        stuck_goal={'x':current['x']+.65,'y':current['y']+.1,'map_revision':api(8080,'/api/map')['revision']}
+        with mcu.lock:mcu.blocked=True;stuck_position=mcu.position.copy()
+        stuck_started=time.monotonic();api(8080,'/api/navigation/goal',stuck_goal)
+        wait_for(lambda:any(t>stuck_started and v.get('state')=='stuck_reverse' for t,v in sensors.controller_states),18,'HW no-progress/stuck state enters reverse')
+        assert api(8080,'/api/state')['navigation']['goal_pending']
+        reverse_started=time.monotonic()
+        with mcu.lock:mcu.blocked=False
+        direction_map=np.array([stuck_goal['x']-current['x'],stuck_goal['y']-current['y']])
+        direction_body=truth[:2,:2].T@direction_map;direction_body/=np.linalg.norm(direction_body)
+        wait_for(lambda:any(t>reverse_started and np.dot([x,y],direction_body)<-.01 for t,x,y,*_ in mcu.commands),5,'HW reverse commands oppose the blocked travel direction')
+        wait_for(lambda:np.dot(mcu.position-stuck_position,direction_body)<-.025,5,'HW reverse produces actual retreat')
+        recovered_goal=wait_for(lambda:(n if (n:=api(8080,'/api/state')['navigation'])['status']=='succeeded' else None),60,'HW recovery replans and reaches original destination')
+        assert recovered_goal['goal']['x']==stuck_goal['x'] and recovered_goal['goal']['y']==stuck_goal['y']
+        assert recovered_goal['retry_count']>0 and not recovered_goal['goal_pending']
         current=api(8080,'/api/state')['navigation']['pose']
         next_goal={'x':current['x']+.9,'y':current['y']+.2,'map_revision':api(8080,'/api/map')['revision']}
         next_started=time.monotonic();api(8080,'/api/navigation/goal',next_goal)
@@ -267,7 +292,7 @@ def main():
         assert api(8081,'/api/state')['navigation_max_speed_mps']==.15,'UART used stale safety limit'
         result={'original_blocked_goal_arrival_error_m':original_arrival_error,'controller_failure_retry_count':paused['retry_count'],'global_pose_error_m':float(np.linalg.norm([recovered['x']-expected[0],recovered['y']-expected[1]])),
                 'native_commands':len(mcu.commands),'max_command_speed_mps':max(math.hypot(c[1],c[2]) for c in mcu.commands),
-                'checks':['automatic unknown-pose GICP','FDDP activation','time-indexed predictions','synthetic measured feedback','Web preview/goal','native CRC/ACK transport',
+                'recovery_states':sorted({v.get('state','') for _,v in sensors.controller_states if v.get('state')}),'checks':['HW global planning plugin and MINCO profile','HW physical blockage triggers reverse and original-goal arrival','automatic unknown-pose GICP','FDDP activation','time-indexed predictions','synthetic measured feedback','Web preview/goal','native CRC/ACK transport',
                           'localization loss stops','automatic replan/resume','explicit retry RPC and resume','manual takeover revokes lease','new explicit goal reaches target and stops','65-page stop capacity','orphan lease expires and reacquires','mode switch reloads MPC and UART limits','controller failure retains target beyond patience','original blocked destination reached and stopped','replan and continue to destination after recovery','cancel while waiting prevents restart']}
         (runtime/'integration-result.json').write_text(json.dumps(result,indent=2))
         print(json.dumps(result),flush=True)
@@ -275,16 +300,21 @@ def main():
         debug={}
         try:debug['state']=api(8080,'/api/state')
         except Exception:pass
+        try:debug['serial_state']=api(8081,'/api/state')
+        except Exception:pass
         debug['raw_commands']=sensors.raw_commands[-10:]
         if sensors.last_grid:
             from scipy.ndimage import distance_transform_edt
             g=sensors.last_grid;a=np.asarray(g.data).reshape(g.info.height,g.info.width)
             d=distance_transform_edt((a>=0)&(a<100))*g.info.resolution
-            with mcu.lock:xy=mcu.position.copy()+[.00318,-.02329]
+            pose=debug.get('state',{}).get('navigation',{}).get('pose',{})
+            xy=[pose.get('x',0),pose.get('y',0)]
             ix=int((xy[0]-g.info.origin.position.x)/g.info.resolution)
             iy=int((xy[1]-g.info.origin.position.y)/g.info.resolution)
-            debug['local_grid']={'counts':{str(k):int(v) for k,v in zip(*np.unique(a,return_counts=True))},
-                'center_value':int(a[iy,ix]),'center_clearance':float(d[iy,ix])}
+            debug['local_grid']={'counts':{str(k):int(v) for k,v in zip(*np.unique(a,return_counts=True))}}
+            if 0<=ix<g.info.width and 0<=iy<g.info.height:
+                debug['local_grid'].update(center_value=int(a[iy,ix]),center_clearance=float(d[iy,ix]))
+            debug['controller_states']=sensors.controller_states[-20:]
         (runtime/'integration-debug.json').write_text(json.dumps(debug,ensure_ascii=False,indent=2))
         raise
     finally:

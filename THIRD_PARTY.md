@@ -11,6 +11,7 @@
 | Livox-SDK2 | Livox-SDK/Livox-SDK2 `c0796f04c143143899c87a773d9f6b7136453c0b` | 构建时拉取，按其 LICENSE 分发 |
 | HW 配准质量评估参考 | Polyacetone/HWSentryNav26 | MIT，见 LICENSES/HWSentryNav26.txt；重写注册服务和调度，不是 HW 官方版本 |
 | HW FDDP 求解器 | Polyacetone/HWSentryNav26 `f5f941288197e14c867d711a4c4cd85bfd7a3194` | 原样复制 `fddp_solver.hpp`，MIT 许可证见 `hw_omni_controller/vendor/LICENSE` |
+| HW 原始规划、跟踪与恢复 | Polyacetone/HWSentryNav26 `f5f941288197e14c867d711a4c4cd85bfd7a3194` | 复制 `common`、`path_planner` 及恢复/监控状态机，平地全向适配见 `hw_omni_controller/vendor/hw_nav/README.md`，MIT 许可证同目录 |
 | HW 障碍预测思路 | 同上 | 本地重写检测/关联/卡尔曼/形状外推，未复制轮腿地图服务器 |
 | Drogon、Trantor、JsonCpp | Ubuntu 24.04 系统开发包 | 使用对应上游许可证，动态链接，不复制依赖源码 |
 | Nav2、MPPI、ROS 2、PCL | Ubuntu / ROS Jazzy 系统包 | 使用对应上游许可证，不复制系统二进制 |

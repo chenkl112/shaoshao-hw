@@ -1,0 +1,118 @@
+{
+  "date": "2026-10-23",
+  "reference": {
+    "repository": "https://github.com/Polyacetone/HWSentryNav26",
+    "commit": "f5f941288197e14c867d711a4c4cd85bfd7a3194"
+  },
+  "implementation": {
+    "language": "C++23",
+    "planner_plugin": "hw_omni_controller::Planner",
+    "pipeline": [
+      "spatial A*",
+      "LOS reference path",
+      "geodesic corridor",
+      "Kino A*",
+      "MINCO",
+      "arc-length speed profile"
+    ],
+    "tracking": "HW RouteTracker with map-frame translation velocity",
+    "recovery": "HW ProgressMonitor, SafetyMonitor, StateMachine and polar safe-point search",
+    "retry_cooldown_s": 0.5,
+    "no_progress_timeout_s": 6,
+    "no_progress_landmark_m": 0.1,
+    "lethal_rejections_before_replan": 3,
+    "reverse_distance_m": 0.35,
+    "reverse_timeout_s": 3,
+    "reverse_speed_mps": "min(0.2, configured_max_speed / 2)",
+    "safe_search_radius_m": [
+      0.5,
+      1.5
+    ],
+    "safe_search_period_s": 4,
+    "safe_hold_s": 1
+  },
+  "validation": {
+    "colcon": {
+      "passed": true,
+      "packages": 8
+    },
+    "cpp_ctest": [
+      "hw_navigation",
+      "runtime_core"
+    ],
+    "cpp_existing": [
+      "native MPC derivatives, closed-loop tracking, safety and bounds",
+      "native obstacle predictor, actual feedback and command relay"
+    ],
+    "python_unittest_counts": [
+      16,
+      104
+    ],
+    "javascript_suites": [
+      "mobile_mapping_ui",
+      "lidar_mapping_ui",
+      "stream_ui"
+    ],
+    "ros_integration": {
+      "original_blocked_goal_arrival_error_m": 0.021797408353863564,
+      "controller_failure_retry_count": 1,
+      "global_pose_error_m": 2.8413644445559215e-06,
+      "native_commands": 3045,
+      "max_command_speed_mps": 0.20918043250591106,
+      "recovery_states": [
+        "follow",
+        "stuck_reverse"
+      ],
+      "checks": [
+        "HW global planning plugin and MINCO profile",
+        "HW physical blockage triggers reverse and original-goal arrival",
+        "automatic unknown-pose GICP",
+        "FDDP activation",
+        "time-indexed predictions",
+        "synthetic measured feedback",
+        "Web preview/goal",
+        "native CRC/ACK transport",
+        "localization loss stops",
+        "automatic replan/resume",
+        "explicit retry RPC and resume",
+        "manual takeover revokes lease",
+        "new explicit goal reaches target and stops",
+        "65-page stop capacity",
+        "orphan lease expires and reacquires",
+        "mode switch reloads MPC and UART limits",
+        "controller failure retains target beyond patience",
+        "original blocked destination reached and stopped",
+        "replan and continue to destination after recovery",
+        "cancel while waiting prevents restart"
+      ]
+    },
+    "ros_integration_artifact_directory": "/tmp/shaoshao-hw-planning-validation4"
+  },
+  "native_cases": [
+    "whole HW pipeline in open space",
+    "detour around a blocking wall",
+    "disconnected map",
+    "unknown goal",
+    "3.1/6/12/20/49 cm trajectories",
+    "cooperative planning cancellation",
+    "MINCO/profile serialization and stale identity",
+    "profile speed bounds and terminal stop",
+    "six-second no progress",
+    "two-second stuck detection",
+    "reverse completion and timeout",
+    "hazard safe-point search and one-second safe hold",
+    "lethal escape barriers",
+    "failed-search cooldown and retry",
+    "three consecutive lethal rejections",
+    "no safe point remains stopped",
+    "circular unknown footprint and boundary regression"
+  ],
+  "limits": [
+    "Synthetic ROS sensors, measured feedback and PTY MCU; not a real-vehicle acceptance test.",
+    "Omni vehicle uses translation-tangent heading; Kino primitives retain HW smooth-curve geometry preference.",
+    "All-flat direction map; no wheel-leg stair, run-up or flight modes.",
+    "Nav2 global snapshot includes current obstacles; original HW terrain-specific map layering is not reproduced.",
+    "No restart/blackout persistence for goals; actual MCU protocol remains pending.",
+    "Recovery velocity and distance are reduced for the current vehicle; recovery motion still passes MPC and the independent safety relay."
+  ]
+}

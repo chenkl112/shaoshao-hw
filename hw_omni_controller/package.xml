@@ -1,10 +1,10 @@
 <?xml version="1.0"?>
 <package format="3">
   <name>hw_omni_controller</name><version>0.1.0</version>
-  <description>Whole-vehicle omnidirectional MPC using the HW FDDP solver.</description>
+  <description>HW global planning, MINCO trajectories and recovery with whole-vehicle omnidirectional FDDP MPC.</description>
   <maintainer email="maintainer@example.com">shaoshao</maintainer><license>MIT</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
-  <depend>rclcpp</depend><depend>rclcpp_lifecycle</depend><depend>tf2_ros</depend>
+  <depend>libopencv-dev</depend><depend>rclcpp</depend><depend>rclcpp_lifecycle</depend><depend>tf2_ros</depend>
   <depend>sensor_msgs</depend><depend>pcl_ros</depend><depend>geometry_msgs</depend>
   <depend>nav2_core</depend><depend>nav2_costmap_2d</depend><depend>nav_msgs</depend><depend>std_msgs</depend>
   <depend>shaoshao_hw_interfaces</depend><depend>tf2_geometry_msgs</depend><depend>pluginlib</depend><depend>eigen</depend>

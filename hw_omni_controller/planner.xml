@@ -1,0 +1,5 @@
+<library path="hw_omni_controller">
+  <class name="hw_omni_controller::Planner" type="hw_omni::Planner" base_class_type="nav2_core::GlobalPlanner">
+    <description>HW spatial A*, corridor Kino A*, MINCO geometry and arc-length speed profile for omnidirectional translation.</description>
+  </class>
+</library>

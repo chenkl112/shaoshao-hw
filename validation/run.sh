@@ -11,6 +11,7 @@ source "$SHAOSHAO_HW_RUNTIME/mapping_install/setup.bash"
 set -u
 cd "$source_root"
 ctest --test-dir "$SHAOSHAO_HW_RUNTIME/build/shaoshao_hw_runtime" --output-on-failure
+ctest --test-dir "$SHAOSHAO_HW_RUNTIME/build/hw_omni_controller" --output-on-failure
 python3 -m unittest discover -s tests -v
 python3 -m unittest discover -s web_panel -p 'test*.py' -q
 g++ -O2 -std=c++20 -I /usr/include/eigen3 \

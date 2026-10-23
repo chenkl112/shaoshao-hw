@@ -2,4 +2,7 @@
   <class name="hw_omni_controller::Controller" type="hw_omni::Controller" base_class_type="nav2_core::Controller">
     <description>HW FDDP with measured omnidirectional velocity and time-indexed obstacle predictions.</description>
   </class>
+  <class name="hw_omni_controller::RecoveryProgressChecker" type="hw_omni::RecoveryProgressChecker" base_class_type="nav2_core::ProgressChecker">
+    <description>Delegate progress and recovery to the HW controller state machine.</description>
+  </class>
 </library>

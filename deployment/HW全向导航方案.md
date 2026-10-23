@@ -1,9 +1,11 @@
 # 四轮全向底盘：HW FDDP 与动态障碍预测
 
-本分支保留 FAST-LIO、关键帧检索/GICP、Nav2 NavFn 全局规划、网页选点和租约接口。
-局部控制由 MPPI 改为 `hw_omni_controller::Controller`。直接复用 HW 的 FDDP
-求解器，使用本车的整车 XY 速度响应模型。未引入 small_glim、轮腿 LPV 参数、
-MINCO/动力学 A* 或台阶执行；四轮逆运动学由电控完成。
+本分支保留 FAST-LIO、关键帧检索/GICP、Nav2 任务接口、网页选点和租约接口。
+全局规划使用 `hw_omni_controller::Planner`，复用 HW 原始空间 A*、LOS 参考路径、
+引导走廊、Kino A*、MINCO 和弧长域速度剖面；局部控制使用 HW FDDP 和本车整车 XY 响应模型。
+执行侧复用 HW 的 RouteTracker、无进展检测、物理卡住检测、倒车和危险区恢复状态机、极坐标安全点搜索。
+Kino/MINCO 的航向表示平移切线方向，不命令雷达或底盘转向。平地适配不启用轮腿台阶、助跑和地形模式；
+FAST-LIO 与独立小陀螺接口保持原设计，四轮逆运动学由电控完成。细节见 [规划与脱困适配](../validation/hw-planning-recovery.md)。
 
 ## 数据链
 
@@ -26,7 +28,7 @@ flowchart LR
 FAST-LIO、GICP 配准、FDDP MPC、动态障碍检测/关联/卡尔曼跟踪/预测，以及 50 Hz 速度输出使用 C++。
 新增 `obstacle_predictor` 和 `command_relay` 均由 `hw_omni_controller` 包构建为原生节点。
 网页前端使用 JavaScript，对外 HTTP/WebSocket 与点云显示服务使用 C++ Drogon，详见 [网页架构](网页架构.md)。
-Python 保留内部任务监管、配置/启动、定位调度、地图关键帧索引及离线回归；任务层只发布租约心跳和状态，
+生产任务监管、配置/启动、定位调度和关键帧索引由 C++ runtime 执行；Python 保留历史兼容与离线回归。任务层只发布租约心跳和状态，
 不计算或转发运动速度。原 Python 障碍预测节点已经移除，避免同时运行两套实现。后续新串口适配器优先使用 C++。
 
 ## 预留电控接口

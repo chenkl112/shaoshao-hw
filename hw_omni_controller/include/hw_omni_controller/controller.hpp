@@ -10,6 +10,9 @@
 #include <std_msgs/msg/string.hpp>
 #include "mpc.hpp"
 #include "feedback.hpp"
+#include "trajectory_bridge.hpp"
+#include "recovery.hpp"
+#include <deque>
 
 namespace hw_omni {
 class Controller : public nav2_core::Controller {
@@ -34,6 +37,13 @@ private:
   double speed_limit_=0.5,feedback_timeout_=0.15,prediction_timeout_=0.3,pose_timeout_=0.15;
   std::mutex mutex_;
   nav_msgs::msg::Path plan_;
+  struct Snapshot { nav_msgs::msg::Path path; nav_executor::AnnotatedPath::ConstPtr trajectory; };
+  std::deque<Snapshot> trajectory_cache_;
+  nav_executor::AnnotatedPath::ConstPtr trajectory_;
+  std::unique_ptr<nav_executor::RouteTracker> tracker_;
+  std::unique_ptr<Recovery> recovery_;
+  rclcpp::Time plan_at_{0,0,RCL_ROS_TIME};
+  rclcpp::Subscription<TrajectoryMessage>::SharedPtr trajectory_sub_;
   shaoshao_hw_interfaces::msg::ChassisFeedback::SharedPtr feedback_;
   shaoshao_hw_interfaces::msg::PredictedObstacles::SharedPtr predictions_;
   rclcpp::Subscription<shaoshao_hw_interfaces::msg::ChassisFeedback>::SharedPtr feedback_sub_;

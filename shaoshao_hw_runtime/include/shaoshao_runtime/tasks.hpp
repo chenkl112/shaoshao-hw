@@ -19,7 +19,7 @@ public:
   Json::Value pose,local_pose,localization,goal,path=Json::Value(Json::arrayValue),plan,remaining,motion,costmap;
   std::optional<Json::Value> resume;std::optional<uint64_t> resume_plan,resume_goal_generation;double resume_retry_at=0;
   bool goal_pending=false;uint64_t retry_count=0;double cancel_deadline=0;
-  static constexpr double retry_period=1.;
+  static constexpr double retry_period=.5;
   explicit Tasks(fs::path directory):maps(std::move(directory)){fs::create_directories(maps);clear_plan();costmap["available"]=false;}
   std::string reason(double now) const {
     if(switching)return "正在切换运行模式";if(mode!="navigation")return "请先点击顶部“导航”";if(!error.empty())return error;
