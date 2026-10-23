@@ -1,6 +1,8 @@
 # Samples are measurements at header.stamp, synchronized into the ROS clock.
 # frame_id: navcar_center; axes follow the lidar, origin is the yaw axis.
 # Never publish UART V1 target echoes as this message.
+# V2 body-frame wheel feedback is /hw/navcar/feedback (NavcarFeedback); its
+# receive time and startup IMU yaw do not satisfy this synchronized contract.
 std_msgs/Header header
 uint64 seq
 # Changes on every hardware/manual takeover, including disable -> enable.

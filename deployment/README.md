@@ -1,6 +1,6 @@
 # 哨哨 HW 上车部署
 
-适用 Ubuntu 24.04 / ROS 2 Jazzy、MID360、四轮全向底盘。新电控协议未定，当前先预留 ROS 接口，详见 [HW 全向导航方案](HW全向导航方案.md)。旧 Navcar UART1 V1 仅保留兼容，不能提供新控制器需要的实测反馈。源码放在 `~/ccc/shaoshao-hw`，运行文件放在 `~/ccc/shaoshao-hw-runtime`，地图放在 `~/scurm_maps/shaoshao-hw`。不覆盖旧工程的源码、配置或地图。
+适用 Ubuntu 24.04 / ROS 2 Jazzy、MID360、四轮全向底盘。UART1 已同步 [Navcar V2](NavcarV2接入.md)：指令使用 SI 单位，反馈为底盘系轮速反解速度和云台惯导角。协议尚缺硬件控制权、采样时间和云台相对底盘角，原始反馈不直接送入导航 MPC。旧 V1 通过独立配置保留兼容。源码放在 `~/ccc/shaoshao-hw`，运行文件放在 `~/ccc/shaoshao-hw-runtime`，地图放在 `~/scurm_maps/shaoshao-hw`。不覆盖旧工程的源码、配置或地图。
 
 ## 安装与构建
 
@@ -10,7 +10,7 @@
 sudo apt update
 sudo apt install build-essential cmake git python3-dev python3-colcon-common-extensions \
   python3-numpy python3-scipy python3-pil python3-yaml python3-serial \
-  libeigen3-dev libpcl-dev libapr1-dev libcurl4-openssl-dev \
+  libeigen3-dev libpcl-dev libopencv-dev libapr1-dev libcurl4-openssl-dev \
   libssl-dev libminizip-dev libpng-dev \
   libdrogon-dev libjsoncpp-dev libtrantor-dev uuid-dev zlib1g-dev libbrotli-dev \
   libhiredis-dev libpq-dev libmariadb-dev libsqlite3-dev libyaml-cpp-dev \
@@ -29,12 +29,12 @@ bash deployment/bootstrap.sh
 ## 上车前确认
 
 1. 编辑源码 `web_panel/robot.yaml`：当前车体、雷达尺寸已填好；确认串口路径和 `network` 的 IP。
-2. 第一次构建会生成运行目录 `config/serial.navcar.yaml` 和 `config/MID360_config.json`。后续修改串口和雷达网络时，修改这两个运行文件；构建不会覆盖它们。首次构建前修改 `robot.yaml` 对应项也可。
+2. 第一次构建会生成运行目录 `config/serial.navcar.yaml` 和 `config/MID360_config.json`。后续修改串口和雷达网络时，修改这两个运行文件；构建不会覆盖它们。旧运行目录的 V1 配置需按 `web_panel/serial.navcar.example.yaml` 迁移到 V2；启动时源码与串口版本不一致会报错。首次构建前修改 `robot.yaml` 对应项也可。
 3. 雷达网卡设置为 `192.168.10.100/24`，当前雷达为 `192.168.10.101`。按实际网卡配置，确保雷达网段不与其他接口冲突。
 4. 用 `ls -l /dev/serial/by-id/` 确认串口。必要时 `sudo usermod -aG dialout "$USER"` 后重新登录。
-5. 确认下位机使用 2,000,000 baud，并对失去指令做停车处理；原平移指令倍率为 10。横移、制动和 yaw 保持效果需实测。
+5. 确认下位机使用 2,000,000 baud，并对失去指令做停车处理；V2 平移不再乘十，旋转逆时针为正。横移、制动和 yaw 保持效果需实测。
 
-本版需要 `/hw/chassis_feedback` 的真实 XY 速度、底盘角速度、云台相对角与硬件控制权。新串口适配器待协议确定后实现；没有反馈时导航保持停车。上位机发 SI 单位整车目标，电控完成坐标转换、四轮分配和电机闭环。小陀螺使用独立通道，原 V1 目标回显不能代替实测。
+本版需要 `/hw/chassis_feedback` 的真实 XY 速度、底盘角速度、云台相对角与硬件控制权。C++ V2 适配器发布 `/hw/navcar/feedback`，其中时间戳表示主机接收时刻。它不能替代满足同步、雷达坐标和硬件授权要求的 `/hw/chassis_feedback`；没有后者时导航保持停车。上位机发 SI 单位整车目标，电控完成坐标转换、四轮分配和电机闭环。小陀螺与平移各自有超时，在 V2 控制帧中合并发送。原 V1 目标回显不能代替实测。
 
 ## 启动、建图与导航
 
@@ -67,7 +67,7 @@ bash ~/ccc/shaoshao-hw-runtime/start_mapping.sh --idle
 | 光心相对 yaw 轴偏移 | 同上 `yaw.lidar_offset_xy_m` |
 | 配准质量与时间限制 | 可在同上 `navigation.registration` 覆盖，完整默认值见 `shaoshao_hw_runtime/include/shaoshao_runtime/common.hpp` |
 | 加减速度、jerk | 可在同上 `navigation.motion` 覆盖，默认 0.3 / 0.3 / 1.0 |
-| 串口与实测倍率 | 运行目录 `config/serial.navcar.yaml` |
+| 串口、V2 版本与 SI 限幅 | 运行目录 `config/serial.navcar.yaml` |
 | 雷达网络 | 运行目录 `config/MID360_config.json` |
 | FDDP 整车响应参数 | `web_panel/robot.yaml` → `navigation.mpc`；0.30 s 为初始假设，待辨识 |
 | 动态障碍跟踪 | 同上 `navigation.obstacles`，默认值见 `shaoshao_hw_runtime/include/shaoshao_runtime/common.hpp` |

@@ -15,6 +15,6 @@
 | HW 障碍预测思路 | 同上 | 本地重写检测/关联/卡尔曼/形状外推，未复制轮腿地图服务器 |
 | Drogon、Trantor、JsonCpp | Ubuntu 24.04 系统开发包 | 使用对应上游许可证，动态链接，不复制依赖源码 |
 | Nav2、MPPI、ROS 2、PCL | Ubuntu / ROS Jazzy 系统包 | 使用对应上游许可证，不复制系统二进制 |
-| Navcar UART 协议 | Li-chee/Navcar-Comm-Protocol `4eb14adf5d7bc463dca50c092a1b3be66f77ef9a` | 沿用原适配，不改变 MCU 帧格式 |
+| Navcar UART 协议 | Li-chee/Navcar-Comm-Protocol `43333c533538490c1e2262a63a004cde088d7f79` | 文档 V2，线协议 VERSION 仍为 1；SI 命令与底盘轮速反馈，见 `LICENSES/Navcar-Comm-Protocol.txt` |
 
 新增 `shaoshao_hw`、`hw_registration`、`shaoshao_hw_interfaces`、`shaoshao_hw_runtime` 代码使用 MIT，见 LICENSES/shaoshao-hw.txt。历史文档仅作参考，以根 README 和 deployment/README 为本版部署依据。

@@ -1,8 +1,8 @@
 # 哨哨 HW
 
-面向四轮全向底盘和顶置 MID360 的独立导航工程。保留 FAST-LIO + small_gicp、网页选点和 Nav2 任务接口；全局规划使用 HW 空间 A*、走廊 Kino A*、MINCO 和速度剖面，局部控制使用 HW FDDP 求解器与整车 XY 速度响应模型；动态障碍检测/跟踪/预测、底盘反馈门控和 50 Hz 速度转发使用 C++。实现边界与电控接口见 [HW 全向导航方案](deployment/HW全向导航方案.md)。
+面向四轮全向底盘和顶置 MID360 的独立导航工程。保留 FAST-LIO + small_gicp、网页选点和 Nav2 任务接口；全局规划使用 HW 空间 A*、走廊 Kino A*、MINCO 和速度剖面，局部控制使用 HW FDDP 求解器与整车 XY 速度响应模型；动态障碍检测/跟踪/预测、底盘反馈门控和 50 Hz 速度转发使用 C++。UART1 已同步 [Navcar V2](deployment/NavcarV2接入.md)：SI 目标与底盘系轮速反馈。实现边界与电控接口见 [HW 全向导航方案](deployment/HW全向导航方案.md)。
 
-从 [shaoshao](https://github.com/chenkl112/shaoshao) 的 `debd22c1089ef2421fdb5667d0f08007d4aa9e7c` 独立建立，参考 [HWSentryNav26](https://github.com/Polyacetone/HWSentryNav26) 的配准质量评估思路。原仓库保持独立。上车步骤见 [部署说明](deployment/README.md)，串口格式见 [Navcar 接入](web_panel/Navcar接入.md)。
+从 [shaoshao](https://github.com/chenkl112/shaoshao) 的 `debd22c1089ef2421fdb5667d0f08007d4aa9e7c` 独立建立，参考 [HWSentryNav26](https://github.com/Polyacetone/HWSentryNav26) 的配准质量评估思路。原仓库保持独立。上车步骤见 [部署说明](deployment/README.md)，串口格式见 [Navcar V2 接入](deployment/NavcarV2接入.md)。
 
 ## 本版行为
 
@@ -15,11 +15,11 @@
 - HW FDDP 20 Hz 预测未来 2 s 的全向运动，目标合速度上限 **0.5 m/s**、加速度 **0.3 m/s²**、jerk **1 m/s³**；50 Hz 转发目标。平移与小陀螺分通道，四轮分配由电控完成。
 - 规划失败保留目标，0.5 s 冷却后重试；跟随 6 s 无进展或检测物理卡住时进入反向退让/安全点恢复，结束后重新规划原目标。见 [规划与脱困适配](validation/hw-planning-recovery.md)。
 - 点云与静态地图差分，聚类、匈牙利关联和卡尔曼跟踪，发布带形状的 3 s 障碍预测；MPC 按采样时间对齐并验收未来碰撞。
-- 新串口字节协议暂未确定，已预留实际 XY 速度、底盘角速度、云台相对角、控制权和采样时间接口。没有新实测反馈就保持停车。旧 V1 编解码仅保留兼容，ACK/目标回显不作为测量。
+- UART1 V2 直接发送 SI 目标并回传底盘系轮速推算值；原始反馈发布到 `/hw/navcar/feedback`。协议仍缺硬件控制权、采样时间和云台相对底盘角，因此不直接生成导航所需的 `/hw/chassis_feedback`，这些条件未补齐时导航保持停车。
 
 ## 网页
 
-原生 HTML/CSS/JavaScript 前端 + C++ Drogon HTTP/WebSocket 服务。状态推送与 float32 二进制点云由 C++ 提供，Python 任务服务仅使用私有 Unix socket。现有页面和操作入口保留，见 [网页架构](deployment/网页架构.md)。
+原生 HTML/CSS/JavaScript 前端 + C++ Drogon HTTP/WebSocket 服务。状态推送与 float32 二进制点云由 C++ 提供，任务监管服务使用私有 Unix socket。现有页面和操作入口保留，见 [网页架构](deployment/网页架构.md)。
 
 ## 实车配置
 
@@ -35,7 +35,7 @@
 | 导航参考点 | 车体中心的 yaw 轴；方向随雷达 |
 | 全局 / 局部栅格 | 0.025 m |
 | 导航合速度上限 | 0.5 m/s，按路况变化 |
-| 旧串口 / 倍率 | 2,000,000 baud；前后和左右 × 10；新接口使用 SI 单位 |
+| UART1 V2 | 2,000,000 baud；m/s、rad/s 直接下发，旋转逆时针为正 |
 
 本版继续使用覆盖任意底盘朝向的外接圆检查碰撞。含余量的直径约 **635.3 mm**。650 mm 通道只有约 **7.3 mm/侧** 的剩余几何空间，2.5 cm 栅格离散、地图和控制误差仍可能使其不可通行，不能保证通过。
 

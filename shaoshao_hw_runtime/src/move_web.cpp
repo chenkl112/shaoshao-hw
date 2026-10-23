@@ -9,6 +9,8 @@
 #ifdef SHAOSHAO_RUNTIME_ROS
 #include "shaoshao_runtime/ros.hpp"
 #include <shaoshao_hw_interfaces/msg/nav_command.hpp>
+#include <shaoshao_hw_interfaces/msg/navcar_feedback.hpp>
+#include <shaoshao_hw_interfaces/msg/spin_command.hpp>
 #endif
 
 using namespace hw_runtime;
@@ -17,7 +19,9 @@ int main(int argc,char** argv){
     fs::path root=runtime_path(),config,robot;std::string bind="0.0.0.0";int port=8081;bool ros=false;
     for(int i=1;i<argc;++i){std::string key=argv[i];if(key=="--hw-ros"){ros=true;continue;}if(i+1>=argc)throw std::invalid_argument("Missing serial service argument");std::string value=argv[++i];if(key=="--runtime")root=value;else if(key=="--config")config=value;else if(key=="--robot-config")robot=value;else if(key=="--bind")bind=value;else if(key=="--port")port=std::stoi(value);else throw std::invalid_argument("Unknown serial service argument");}
     if(port<1||port>65535)throw std::invalid_argument("Invalid manual service port");if(config.empty())config=root/"config/serial.navcar.yaml";if(robot.empty())robot=root/"shaoshao/web_panel/robot.yaml";
-    serial::Settings settings(config);if(fs::is_regular_file(robot)){Config vehicle(robot);settings.max_speed=std::min(settings.max_speed,vehicle.speed);}
+    serial::Settings settings(config);if(fs::is_regular_file(robot)){Config vehicle(robot);settings.max_speed=std::min(settings.max_speed,vehicle.speed);
+      if(vehicle.yaml["hardware"]["transport"].as<std::string>()!=settings.transport)throw std::invalid_argument("Robot/serial protocol mismatch: migrate config/serial.navcar.yaml to the confirmed firmware version");
+    }
     serial::Controller controller(settings);std::mutex mutex;Port uart(settings.port);
     fs::create_directories(root);std::string token;if(fs::exists(root/"navcar_move.token")){token=read_text(root/"navcar_move.token",1024);while(!token.empty()&&std::isspace(static_cast<unsigned char>(token.back())))token.pop_back();}else{token=random_token();atomic_write(root/"navcar_move.token",token+"\n");chmod((root/"navcar_move.token").c_str(),0600);}if(token.empty())throw std::runtime_error("Manual access token is empty");
     atomic_write(root/"move_web.pid",std::to_string(getpid())+"\n");
@@ -36,11 +40,36 @@ int main(int argc,char** argv){
     });
 #ifdef SHAOSHAO_RUNTIME_ROS
     rclcpp::Node::SharedPtr node;std::unique_ptr<SpinThread> executor;rclcpp::Subscription<shaoshao_hw_interfaces::msg::NavCommand>::SharedPtr subscription;
+    rclcpp::Subscription<shaoshao_hw_interfaces::msg::SpinCommand>::SharedPtr spin_subscription;
+    rclcpp::Publisher<shaoshao_hw_interfaces::msg::NavcarFeedback>::SharedPtr feedback_publisher;
+    rclcpp::TimerBase::SharedPtr feedback_timer;uint64_t published_reception=0;
     if(ros){rclcpp::init(0,nullptr,rclcpp::InitOptions(),rclcpp::SignalHandlerOptions::None);node=std::make_shared<rclcpp::Node>("shaoshao_hw_serial");
       subscription=node->create_subscription<shaoshao_hw_interfaces::msg::NavCommand>("/hw/nav_command",1,[&](shaoshao_hw_interfaces::msg::NavCommand::SharedPtr msg){
         std::lock_guard<std::mutex> lock(mutex);try{const auto& v=msg->twist;if(!fresh(node->now().seconds(),msg->header.stamp,.2)||msg->header.frame_id!="navcar_center"||v.linear.z!=0||v.angular.x!=0||v.angular.y!=0||v.angular.z!=0)throw std::invalid_argument("Invalid/stale leased velocity");Json::Value data;data["lease"]=msg->lease;data["seq"]=Json::UInt64(msg->seq);data["forward"]=v.linear.x;data["left"]=v.linear.y;controller.navigation_command(data,steady());}
         catch(const std::exception&){if(msg->lease==controller.lease){controller.action="stop";controller.navigation.setZero();controller.updated=0;}}
-      });executor=std::make_unique<SpinThread>(node);}
+      });
+      if(settings.v2){
+        feedback_publisher=node->create_publisher<shaoshao_hw_interfaces::msg::NavcarFeedback>("/hw/navcar/feedback",10);
+        feedback_timer=node->create_wall_timer(std::chrono::milliseconds(5),[&]{
+          std::lock_guard<std::mutex> lock(mutex);
+          if(!controller.session.state||!controller.session.state_time||published_reception==controller.session.reception_seq)return;
+          const auto& p=*controller.session.state;double age=steady()-*controller.session.state_time;
+          shaoshao_hw_interfaces::msg::NavcarFeedback msg;msg.header.frame_id="navcar_chassis";
+          msg.header.stamp=node->now()-rclcpp::Duration::from_seconds(std::max(0.,age)); // Reception, NOT MCU sampling time.
+          msg.reception_seq=controller.session.reception_seq;msg.last_command_seq=p.seq;
+          msg.forward_mps=p.values[0];msg.left_mps=-p.values[1];msg.chassis_omega_radps=p.values[2];msg.gimbal_yaw_start_rad=p.values[3]*pi/180.;
+          msg.velocity_valid=p.velocity_valid()&&age>=0&&age<=.15;msg.yaw_valid=p.yaw_valid()&&age>=0&&age<=.15;
+          feedback_publisher->publish(msg);published_reception=controller.session.reception_seq;
+        });
+        spin_subscription=node->create_subscription<shaoshao_hw_interfaces::msg::SpinCommand>("/hw/spin_command",1,[&](shaoshao_hw_interfaces::msg::SpinCommand::SharedPtr msg){
+          std::lock_guard<std::mutex> lock(mutex);
+          try{if(!fresh(node->now().seconds(),msg->header.stamp,.2)||msg->header.frame_id!="navcar_center")throw std::invalid_argument("Invalid/stale independent spin");
+            Json::Value data;data["lease"]=msg->lease;data["seq"]=Json::UInt64(msg->seq);data["omega"]=msg->omega_radps;controller.spin_command(data,steady());
+          }catch(const std::exception&){if(!msg->lease.empty()&&msg->lease==controller.spin_navigation_lease)controller.spin_enabled=false;}
+        });
+      }
+      executor=std::make_unique<SpinThread>(node);
+    }
 #else
     if(ros)throw std::runtime_error("This serial service was built without ROS support");
 #endif

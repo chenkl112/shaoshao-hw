@@ -1,0 +1,105 @@
+{
+  "date": "2026-10-24",
+  "upstream": {
+    "repository": "https://github.com/Li-chee/Navcar-Comm-Protocol",
+    "commit": "43333c533538490c1e2262a63a004cde088d7f79",
+    "document_version": "V2",
+    "wire_version": 1,
+    "snapshot_sha256": "44635b4c81339b38c4570bdc999df6ca9d6443b0e6aa9562b1af5796d35cc559"
+  },
+  "implementation": {
+    "runtime": "C++",
+    "transport": "navcar_uart1_v2",
+    "baud": 2000000,
+    "control_units": [
+      "m/s forward",
+      "m/s right",
+      "rad/s CCW",
+      "degrees startup gimbal yaw"
+    ],
+    "legacy_scaling": false,
+    "feedback_source": "wheel-speed inverse kinematics in chassis frame; startup-reference gimbal IMU angle",
+    "raw_topic": "/hw/navcar/feedback",
+    "raw_message": "NavcarFeedback",
+    "timestamp_semantics": "host reception time, not MCU sample time",
+    "separate_rotation_watchdog_s": 0.2,
+    "translation_watchdog_s": 0.2,
+    "legacy_v1": "explicit transport and separate example; mismatch fails before opening port"
+  },
+  "validation": {
+    "build_packages": 8,
+    "ctest": [
+      "runtime_core",
+      "serial_v2",
+      "hw_navigation"
+    ],
+    "python_tests": [
+      16,
+      104
+    ],
+    "javascript_suites": [
+      "navcar_move_ui",
+      "mobile_mapping_ui",
+      "lidar_mapping_ui",
+      "stream_ui"
+    ],
+    "serial_contract": {
+      "protocol_commit": "43333c533538490c1e2262a63a004cde088d7f79",
+      "body_velocity_error_mps": 0.0023475195634443764,
+      "raw_feedback_messages": 96,
+      "checks": [
+        "V1/V2 mismatch fails before opening hardware",
+        "V2 100 Hz repeated command sequence",
+        "SI and CCW wire mapping",
+        "body-frame measurements differ from targets",
+        "independent translation/spin watchdogs",
+        "NaN velocity invalidates state while yaw stays valid",
+        "JSON invalid numbers are null",
+        "no fabricated ChassisFeedback or hardware authority"
+      ]
+    },
+    "navigation_simulation": {
+      "original_blocked_goal_arrival_error_m": 0.021131352678776395,
+      "controller_failure_retry_count": 1,
+      "global_pose_error_m": 2.54901212183251e-06,
+      "native_commands": 3235,
+      "max_command_speed_mps": 0.2195704136560829,
+      "recovery_states": [
+        "follow",
+        "stuck_reverse"
+      ],
+      "checks": [
+        "UART1 V2 SI commands and body-frame measured feedback",
+        "V2 100 Hz repeated command sequence accepted",
+        "HW global planning plugin and MINCO profile",
+        "HW physical blockage triggers reverse and original-goal arrival",
+        "automatic unknown-pose GICP",
+        "FDDP activation",
+        "time-indexed predictions",
+        "synthetic measured feedback",
+        "Web preview/goal",
+        "native CRC/ACK transport",
+        "localization loss stops",
+        "automatic replan/resume",
+        "explicit retry RPC and resume",
+        "manual takeover revokes lease",
+        "new explicit goal reaches target and stops",
+        "65-page stop capacity",
+        "orphan lease expires and reacquires",
+        "mode switch reloads MPC and UART limits",
+        "controller failure retains target beyond patience",
+        "original blocked destination reached and stopped",
+        "replan and continue to destination after recovery",
+        "cancel while waiting prevents restart"
+      ]
+    }
+  },
+  "limits": [
+    "No physical vehicle or real motor actuation; ROS/HTTP/PTY tests use an explicit synthetic MCU and plant.",
+    "V2 omits MCU sampling time, hardware control mode/takeover epoch and gimbal-to-chassis encoder angle.",
+    "No direct NavcarFeedback -> ChassisFeedback publication; startup IMU yaw cannot replace relative encoder yaw.",
+    "Wheel-derived velocity is not independent ground-truth velocity under slip or lift.",
+    "Navigation integration supplies synchronized lidar-frame velocity and hardware authorization through explicit synthetic sensors; it does not prove those fields exist in firmware.",
+    "Existing runtime serial configuration is preserved; migrate explicitly after confirming V2 firmware."
+  ]
+}

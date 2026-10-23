@@ -35,7 +35,7 @@ network:
   host_ip: 192.168.10.100              # 雷达专用网口 IP，待测
   lidar_ip: 192.168.10.101             # MID360 实际 IP，待测
 hardware:
-  transport: navcar_uart1_v1  # 已选定参考串口协议；下位机由底盘负责人实现
+  transport: navcar_uart1_v2  # 文档 V2：SI 指令、底盘系轮速反馈；仍缺采样时间/拨杆授权/相对编码器角
   driver_command: []         # 已有 ROS 驱动的启动命令数组，待测；也可单独启动
   serial_port:  /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B21005517-if00          # 例如 /dev/serial/by-id/...，待测
   baud: 2000000                 # 与下位机一致，待测
@@ -45,7 +45,7 @@ hardware:
 # 以下作为待测记录，不会被当成真实值写入轮速控制器。
 pending:
   ubuntu_ros_version: 24.04
-  controller_model_and_protocol: navcar_uart1_v1
+  controller_model_and_protocol: navcar_uart1_v2
   wheel_radius_m: null
   half_wheelbase_m: null
   half_track_m: null

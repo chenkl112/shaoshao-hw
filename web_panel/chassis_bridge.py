@@ -21,6 +21,8 @@ def main():
         import yaml
         raw = (yaml.safe_load(args.config.read_text(encoding='utf-8')) if args.config.suffix.lower() in ('.yaml', '.yml')
                else json.loads(args.config.read_text(encoding='utf-8')))
+        if isinstance(raw, dict) and raw.get('transport') == 'navcar_uart1_v2':
+            p.error('UART1 V2 使用 C++ hw_move_web，请运行 deployment/start_move_web.sh；此 Python 入口仅兼容 V1')
         if isinstance(raw, dict) and raw.get('transport') == 'navcar_uart1_v1':
             if args.mock:p.error('Navcar does not use the legacy JSONL mock')
             from navcar_bridge import main as navcar_main

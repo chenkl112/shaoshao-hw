@@ -17,7 +17,7 @@ def status(seq=65535, values=(0., 0., 0., 0.)):
 class NavcarTests(unittest.TestCase):
     def test_existing_bridge_dispatch_and_missing_calibration_block(self):
         import yaml
-        config = yaml.safe_load(Path(__file__).with_name('serial.navcar.example.yaml').read_text(encoding='utf-8'))
+        config = yaml.safe_load(Path(__file__).with_name('serial.navcar.v1.example.yaml').read_text(encoding='utf-8'))
         config['serial_port'] = '/dev/serial/by-id/never-open-this-test'
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder)/'serial.yaml';path.write_text(yaml.safe_dump(config))

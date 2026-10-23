@@ -56,3 +56,7 @@ python3 -m unittest discover -s web_panel -p 'test*.py' -q
 这些测试不包含实车电机响应、动态行人、650 mm 窄道和长期运行负载。部署后需补充实车日志与刹车测试。
 
 网页前端与 C++ HTTP/WebSocket 服务可以独立验证，方法见 [网页架构](../deployment/网页架构.md)。该独立验证不替代上面的 ROS 车辆链路联调。
+
+## UART1 V2 验收
+
+`navcar_v2_integration.py` 使用独立 ROS Domain 73、C++ 8081 服务和 PTY MCU，检查 SI/旋转符号、底盘系反馈、重复命令序号、两路独立超时、NaN/惯导独立有效性，以及不会自动伪造 ChassisFeedback。`ros_integration.py` 的 MCU 同步更新为 V2，导航必需的同步时间、雷达系速度和硬件授权仍由显式合成传感器提供。新协议不包含这些字段，真实上车边界见 [V2 接入说明](../deployment/NavcarV2接入.md)。

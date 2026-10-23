@@ -43,7 +43,8 @@ void uart(){
   auto corrupt=state;corrupt[10]^=1;require(parser.feed(corrupt+state,t).size()==1,"CRC corruption resynchronizes to the next frame");
   Session session;session.receive(state,1);require(session.sequence&&*session.sequence==2,"Synchronize next command sequence");auto first=session.poll({0,0,0,17},1);require(!first.empty(),"Send first synchronized target");session.receive(frame(0x80,2,std::string(1,'\0')),1.01);require(session.pending.empty()&&*session.sequence==3,"ACK advances sequence");
   require(session.poll({.1,0,0,17},1.02).size()>0,"Subsequent command");session.poll({.1,0,0,17},1.4);require(!session.error.empty(),"Feedback outage blocks sending");
-  Controller c;c.receive(frame(0x81,1,controls(1,{0,0,0,17}).substr(8,16)),10);auto lease=c.acquire(10);
+  Settings legacy;legacy.v2=false;legacy.transport="navcar_uart1_v1";legacy.forward=legacy.left=10;legacy.max_translation=30;
+  Controller c(legacy);c.receive(frame(0x81,1,controls(1,{0,0,0,17}).substr(8,16)),10);auto lease=c.acquire(10);
   Json::Value command;command["lease"]=lease;command["seq"]=1;command["forward"]=.3;command["left"]=.4;c.navigation_command(command,10);
   auto native=c.desired(10);require(std::abs(native[0]-3)<1e-6&&std::abs(native[1]+4)<1e-6,"Apply UART multiplier exactly once");
   Json::Value manual;manual["action"]="stop";manual["strength"]=.1;manual["client"]="operator";manual["seq"]=1;c.manual(manual,10.01);

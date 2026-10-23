@@ -25,6 +25,7 @@ cmake -S shaoshao_web -B "$SHAOSHAO_HW_RUNTIME/web_native_check" \
   -DSHAOSHAO_WEB_ROS=OFF -DCMAKE_BUILD_TYPE=Release
 cmake --build "$SHAOSHAO_HW_RUNTIME/web_native_check" -j2
 python3 validation/web_integration.py "$SHAOSHAO_HW_RUNTIME/web_native_check/shaoshao_web"
+node web_panel/validation/navcar_move_ui.cjs
 node web_panel/validation/mobile_mapping_ui.cjs
 node web_panel/validation/lidar_mapping_ui.cjs
 node web_panel/validation/stream_ui.cjs
@@ -32,6 +33,7 @@ g++ -std=c++17 -I FAST_LIO/include FAST_LIO/test/test_static_map_filter.cpp -o "
 "$SHAOSHAO_HW_RUNTIME/static_filter_test"
 g++ -std=c++17 -I FAST_LIO/include FAST_LIO/test/test_map_ceiling_filter.cpp -o "$SHAOSHAO_HW_RUNTIME/ceiling_filter_test"
 "$SHAOSHAO_HW_RUNTIME/ceiling_filter_test"
+SHAOSHAO_HW_RUNTIME="$SHAOSHAO_HW_RUNTIME/navcar-v2" ROS_DOMAIN_ID=73 python3 -u validation/navcar_v2_integration.py
 python3 -u validation/ros_integration.py
 SHAOSHAO_HW_RUNTIME="$SHAOSHAO_HW_RUNTIME/lio-validation" python3 -u validation/lio_mapping_integration.py
 SHAOSHAO_MAPPING_SUPERVISOR=1 SHAOSHAO_HW_RUNTIME="$SHAOSHAO_HW_RUNTIME/mapping-supervised" python3 -u validation/lio_mapping_integration.py

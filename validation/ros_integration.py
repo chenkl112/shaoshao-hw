@@ -26,7 +26,7 @@ class NativeMCU:
         self.master,self.slave=pty.openpty();tty.setraw(self.slave);os.set_blocking(self.master,False)
         self.port=os.ttyname(self.slave);self.closed=threading.Event();self.lock=threading.Lock()
         self.velocity=np.zeros(2);self.position=np.zeros(2);self.target=np.zeros(2);self.commands=[]
-        self.blocked=False;self.command_at=0.;self.seq=0;self.thread=threading.Thread(target=self.run,daemon=True);self.thread.start()
+        self.blocked=False;self.invalid_wheels=False;self.command_at=0.;self.seq=65535;self.accepted_payload=None;self.thread=threading.Thread(target=self.run,daemon=True);self.thread.start()
     def run(self):
         buffer=bytearray();previous=time.monotonic();last_state=0.
         while not self.closed.wait(.002):
@@ -42,19 +42,34 @@ class NativeMCU:
                 if len(buffer)<10+size:break
                 packet=bytes(buffer[:10+size]);del buffer[:10+size]
                 if crc16_modbus(packet[2:-2])!=struct.unpack('<H',packet[-2:])[0]:continue
-                if kind==1 and size==16:
-                    native=struct.unpack('<4f',packet[8:-2]);self.seq=seq;self.command_at=now
-                    with self.lock:
-                        self.target=np.array([native[0]/10,-native[1]/10])
-                        self.commands.append((now,*self.target,native[2],native[3]))
-                    os.write(self.master,frame(ACK,seq,b'\x00'))
+                if kind in (ACK,STATE):continue
+                payload=packet[8:-2]
+                if version!=1:code=5
+                elif kind!=1:code=3
+                elif size!=16:code=2
+                else:
+                    native=struct.unpack('<4f',payload);delta=(seq-self.seq)&65535
+                    if not all(math.isfinite(v) for v in native):code=2
+                    elif self.accepted_payload is not None and delta==0:code=1 if payload==self.accepted_payload else 4
+                    elif self.accepted_payload is not None and delta>=32768:code=6
+                    else:
+                        code=0;self.seq=seq;self.accepted_payload=payload;self.command_at=now
+                        with self.lock:
+                            self.target=np.array([native[0],-native[1]])
+                            self.commands.append((now,*self.target,native[2],native[3]))
+                os.write(self.master,frame(ACK,seq,bytes([code])))
             with self.lock:
                 target=self.target if now-self.command_at<.3 else np.zeros(2)
                 self.velocity+=(target-self.velocity)*min(1.,dt/.12)
                 if self.blocked:self.velocity[:]=0
                 self.position+=self.velocity*dt
-            if now-last_state>.04:
-                os.write(self.master,frame(STATE,self.seq,struct.pack('<4f',self.target[0]*10,-self.target[1]*10,0,17)));last_state=now
+            if now-last_state>.01:
+                with self.lock:measured=self.velocity.copy()
+                c,s=math.cos(.4),math.sin(.4)
+                # State is wheel-derived BODY velocity, not command echo or lidar velocity.
+                forward=c*measured[0]-s*measured[1];left=s*measured[0]+c*measured[1]
+                values=(math.nan,math.nan,math.nan,17) if self.invalid_wheels else (forward,-left,0,17)
+                os.write(self.master,frame(STATE,self.seq,struct.pack('<4f',*values)));last_state=now
     def close(self):
         self.closed.set();self.thread.join(1);os.close(self.master);os.close(self.slave)
 
@@ -80,7 +95,7 @@ def main():
     from sensor_msgs.msg import PointCloud2
     from geometry_msgs.msg import TransformStamped
     from tf2_ros import TransformBroadcaster
-    from shaoshao_hw_interfaces.msg import ChassisFeedback
+    from shaoshao_hw_interfaces.msg import ChassisFeedback,NavcarFeedback
     import yaml
     from ament_index_python.packages import get_package_prefix
     def native(name):return Path(get_package_prefix('shaoshao_hw_runtime'))/'lib/shaoshao_hw_runtime'/name
@@ -118,7 +133,8 @@ def main():
             self.feedback=self.create_publisher(ChassisFeedback,'/hw/chassis_feedback',10)
             self.feedback_seq=0;self.authority_epoch=1;self.control_allowed=True
             self.tf=TransformBroadcaster(self);self.enabled=True;self.prediction_fault=False
-            self.last_grid=None;self.raw_commands=[];self.controller_states=[]
+            self.last_grid=None;self.raw_commands=[];self.controller_states=[];self.wire_feedback=[]
+            self.create_subscription(NavcarFeedback,'/hw/navcar/feedback',self.wire_feedback.append,10)
             self.create_subscription(String,'/hw/mpc/status',self.controller_status,10)
             self.create_subscription(OccupancyGrid,'/local_costmap/costmap',self.grid,10)
             self.create_subscription(TwistStamped,'/navcar/cmd_vel_auto',lambda m:self.raw_commands.append([m.twist.linear.x,m.twist.linear.y,m.twist.angular.z]),10)
@@ -167,6 +183,10 @@ def main():
         start('move',[str(native('hw_move_web')),'--runtime',str(runtime),'--hw-ros','--config',str(serial_config),
                       '--robot-config',str(SOURCE/'web_panel/robot.yaml')])
         wait_for(lambda:api(8081,'/api/state')['connected'],10,'Native MCU connection')
+        wait_for(lambda:len(sensors.wire_feedback)>3,5,'V2 wheel-derived feedback ROS topic')
+        wire=sensors.wire_feedback[-1];assert wire.header.frame_id=='navcar_chassis' and wire.velocity_valid and wire.yaw_valid
+        assert abs(wire.gimbal_yaw_start_rad-math.radians(17))<1e-6
+        assert api(8081,'/api/state')['protocol']=='navcar_uart1_v2'
         for i in range(65):
             api(8081,'/api/command',dict(action='stop',client='capacity-'+str(i),seq=1,strength=None))
         orphan=api(8081,'/api/navigation/acquire',{})['lease']
@@ -292,7 +312,7 @@ def main():
         assert api(8081,'/api/state')['navigation_max_speed_mps']==.15,'UART used stale safety limit'
         result={'original_blocked_goal_arrival_error_m':original_arrival_error,'controller_failure_retry_count':paused['retry_count'],'global_pose_error_m':float(np.linalg.norm([recovered['x']-expected[0],recovered['y']-expected[1]])),
                 'native_commands':len(mcu.commands),'max_command_speed_mps':max(math.hypot(c[1],c[2]) for c in mcu.commands),
-                'recovery_states':sorted({v.get('state','') for _,v in sensors.controller_states if v.get('state')}),'checks':['HW global planning plugin and MINCO profile','HW physical blockage triggers reverse and original-goal arrival','automatic unknown-pose GICP','FDDP activation','time-indexed predictions','synthetic measured feedback','Web preview/goal','native CRC/ACK transport',
+                'recovery_states':sorted({v.get('state','') for _,v in sensors.controller_states if v.get('state')}),'checks':['UART1 V2 SI commands and body-frame measured feedback','V2 100 Hz repeated command sequence accepted','HW global planning plugin and MINCO profile','HW physical blockage triggers reverse and original-goal arrival','automatic unknown-pose GICP','FDDP activation','time-indexed predictions','synthetic measured feedback','Web preview/goal','native CRC/ACK transport',
                           'localization loss stops','automatic replan/resume','explicit retry RPC and resume','manual takeover revokes lease','new explicit goal reaches target and stops','65-page stop capacity','orphan lease expires and reacquires','mode switch reloads MPC and UART limits','controller failure retains target beyond patience','original blocked destination reached and stopped','replan and continue to destination after recovery','cancel while waiting prevents restart']}
         (runtime/'integration-result.json').write_text(json.dumps(result,indent=2))
         print(json.dumps(result),flush=True)

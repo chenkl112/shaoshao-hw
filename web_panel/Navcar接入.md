@@ -1,3 +1,5 @@
+> 本页保留为 **UART1 V1 历史说明**。当前生产入口是 C++ `hw_move_web`，默认采用文档 V2；V2 的 SI 单位、实测反馈、独立旋转及当前导航边界以 [Navcar V2 接入](../deployment/NavcarV2接入.md) 和 [部署说明](../deployment/README.md) 为准。下文的倍率、回显、AMCL/DWB 等历史描述不适用于当前 HW 分支。
+
 # Navcar UART1 V1 上位机接入
 
 > 哨哨 HW 使用下文相同帧格式和倍率；启动、运行配置路径以 [新部署说明](../deployment/README.md) 为准。下文旧桥接命令仅供协议参考。

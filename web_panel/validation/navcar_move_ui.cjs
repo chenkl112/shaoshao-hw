@@ -14,18 +14,18 @@ const document={hidden:false,events:{},getElementById:id=>elements[id],querySele
   addEventListener(k,f){this.events[k]=f}};
 const window={events:{},addEventListener(k,f){this.events[k]=f}};
 const calls=[],yawCalls=[],spinCalls=[],allCalls=[],intervals=[];
-let fakeYaw=17,fakeSpin=false,fakeRate=.1,fakeOwner=null;
+let fakeYaw=17,fakeSpin=false,fakeRate=.1,fakeOwner=null,fakeProtocol="navcar_uart1_v1",fakeSpinOwner=null;
 const context={document,window,location:{search:'?token=secret'},crypto:{randomUUID:()=> 'test-client'},
   URLSearchParams,AbortController,Date,Math,Number,console,setTimeout,clearTimeout,
   setInterval(f){intervals.push(f)},
   async fetch(path,args){
     if(args.body){
-      const packet=JSON.parse(args.body);allCalls.push(packet);fakeOwner=packet.client;
+      const packet=JSON.parse(args.body);allCalls.push(packet);if(path!=='/api/spin'||fakeProtocol.endsWith('v1'))fakeOwner=packet.client;
       if(path==='/api/command'){calls.push(packet);fakeSpin=packet.spin_enabled;fakeRate=packet.spin_rate}
       if(path==='/api/yaw'){yawCalls.push(packet);fakeYaw=packet.angle_deg;fakeSpin=false}
-      if(path==='/api/spin'){spinCalls.push(packet);fakeSpin=packet.enabled;fakeRate=packet.rate}
+      if(path==='/api/spin'){fakeSpinOwner=packet.client;spinCalls.push(packet);fakeSpin=packet.enabled;fakeRate=packet.rate}
     }
-    return {ok:true,async json(){return {connected:true,error:'',max_strength:.3,control_started:false,yaw_target_deg:fakeYaw,feedback_targets:[0,0,0,fakeYaw],active:'stop',control_client:fakeOwner,spin:{enabled:fakeSpin,rate:fakeRate,max_rate:6}}}};
+    return {ok:true,async json(){return {protocol:fakeProtocol,connected:true,error:'',max_strength:.3,control_started:false,yaw_target_deg:fakeYaw,feedback_targets:fakeProtocol.endsWith("v1")?[0,0,0,fakeYaw]:null,yaw_actual_deg:23,active:'stop',control_client:fakeOwner,spin:{client:fakeSpinOwner,enabled:fakeSpin,rate:fakeRate,max_rate:6}}}};
   }};
 vm.createContext(context);vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1],context);
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
@@ -68,5 +68,14 @@ const event={preventDefault(){},pointerId:1};
   elements.spinToggle.events.click();await flush();assert.equal(spinCalls.at(-1).enabled,true);
   elements.stop.events.click();await flush();assert.equal(calls.at(-1).spin_enabled,false);
   assert(allCalls.every((x,i)=>i===0||x.seq>allCalls[i-1].seq),'all control interfaces share sequence ordering');
+  fakeProtocol='navcar_uart1_v2';fakeOwner='navigator-owner';await context.poll();
+  assert(elements.feedback.textContent.includes('惯导实测 23'),'V2 must label measured yaw separately from target');
+  elements.spinToggle.events.click();await flush();
+  await context.poll();
+  const translationCount=calls.length,independentCount=spinCalls.length;
+  intervals[0]();await flush();
+  assert.equal(calls.length,translationCount,'V2 stationary spin heartbeat must not cancel a navigation translation lease');
+  assert.equal(spinCalls.length,independentCount+1,'V2 stationary spin heartbeat uses independent endpoint');
+  elements.stop.events.click();await flush();assert.equal(calls.at(-1).spin_enabled,false,'Emergency stop still stops both channels');
   console.log('Movement UI: directions, yaw targets, spin toggle/rate/heartbeat, stop and sequence checks passed');
 })().catch(e=>{console.error(e);process.exitCode=1});
