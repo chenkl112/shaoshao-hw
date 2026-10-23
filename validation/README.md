@@ -4,7 +4,9 @@
 生产节点为 C++，网页前端为 JavaScript。开发机没有系统安装 ROS，验证依赖解包至 `/tmp`，
 未修改车端配置或连接真实硬件。
 
-最新八项审查修复及回归见 [review-fixes.md](review-fixes.md) 和 [2026-10-23-review-fixes.json](2026-10-23-review-fixes.json)。
+最新持续目标行为及验收见 [persistent-goal.md](persistent-goal.md) 和 [2026-10-23-persistent-goal.json](2026-10-23-persistent-goal.json)。
+
+八项审查修复及回归见 [review-fixes.md](review-fixes.md) 和 [2026-10-23-review-fixes.json](2026-10-23-review-fixes.json)。
 
 以下为修复前的基础链路记录 [2026-10-23-results.json](2026-10-23-results.json)：
 

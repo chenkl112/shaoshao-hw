@@ -62,5 +62,15 @@ vm.createContext(context);vm.runInContext(html.match(/<script>([\s\S]*?)<\/scrip
   state.navigation.plan={...state.navigation.plan,status:'failed',message:'无可通行路径',path:[]};
   vm.runInContext('navigationControls()',context);
   assert.equal(elements.goGoal.disabled,true);assert(elements.navStatus.textContent.includes('无可通行路径'));
+  state.navigation.status='waiting';state.navigation.goal_pending=true;state.navigation.auto_resume_pending=true;state.navigation.message='停车等待';
+  vm.runInContext('navigationControls()',context);
+  assert.equal(elements.goGoal.disabled,true,'waiting mission prevents replacing its target');
+  assert.equal(elements.cancelGoal.disabled,false,'waiting mission always remains cancelable');
+  assert(elements.navStatus.textContent.includes('直到到达'),'show persistent destination behavior');
+  state.navigation.status='canceling';vm.runInContext('navigationControls()',context);
+  assert.equal(elements.cancelGoal.disabled,false,'automatic pause cancellation must not prevent explicit mission cancel');
+  state.navigation.status='canceled';state.navigation.goal_pending=false;state.navigation.auto_resume_pending=false;
+  vm.runInContext('navigationControls()',context);
+  assert.equal(elements.cancelGoal.disabled,true,'completed cancellation clears waiting controls');
   console.log('Mobile mapping UI: blocked storage, no AbortSignal.timeout, authenticated polling and start click passed');
 })().catch(e=>{console.error(e);process.exitCode=1});

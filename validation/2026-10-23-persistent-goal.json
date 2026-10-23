@@ -1,0 +1,67 @@
+{
+  "date": "2026-10-23",
+  "base_commit": "9b039e4",
+  "synthetic_only": true,
+  "physical_hardware_connected": false,
+  "behavior": {
+    "persistent_destination": true,
+    "maximum_task_duration": null,
+    "maximum_retry_count": null,
+    "retry_delay_s": 1.0,
+    "per_attempt_controller_patience_s": 0.3,
+    "xy_goal_tolerance_m": 0.03,
+    "stopped_translation_mps": 0.03
+  },
+  "build": {
+    "packages_passed": 8,
+    "runtime_ctest": "passed"
+  },
+  "regressions": {
+    "python_core": 16,
+    "python_panel": 104,
+    "javascript_ui_suites": 3,
+    "native_state_machine": [
+      "15 consecutive failures retain destination",
+      "replan then retry",
+      "successful arrival clears destination",
+      "explicit cancellation while waiting",
+      "hardware feedback timeout pauses",
+      "explicit authority revoke clears destination",
+      "bounded cancellation and late-response rejection",
+      "temporary missing map remains cancelable",
+      "changed map ends old target"
+    ]
+  },
+  "ros_navigation": {
+    "original_blocked_goal_arrival_error_m": 0.006717466533633703,
+    "controller_failure_retry_count": 1,
+    "global_pose_error_m": 2.828835574090192e-06,
+    "native_commands": 2229,
+    "max_command_speed_mps": 0.23392531741448355,
+    "checks": [
+      "automatic unknown-pose GICP",
+      "FDDP activation",
+      "time-indexed predictions",
+      "synthetic measured feedback",
+      "Web preview/goal",
+      "native CRC/ACK transport",
+      "localization loss stops",
+      "automatic replan/resume",
+      "explicit retry RPC and resume",
+      "manual takeover revokes lease",
+      "new explicit goal reaches target and stops",
+      "65-page stop capacity",
+      "orphan lease expires and reacquires",
+      "mode switch reloads MPC and UART limits",
+      "controller failure retains target beyond patience",
+      "original blocked destination reached and stopped",
+      "replan and continue to destination after recovery",
+      "cancel while waiting prevents restart"
+    ]
+  },
+  "limits": [
+    "Simulation and PTY MCU only.",
+    "No goal restoration across power loss or supervisor restart.",
+    "Safety gates remain active during every retry."
+  ]
+}

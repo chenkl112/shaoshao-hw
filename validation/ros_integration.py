@@ -115,7 +115,7 @@ def main():
             self.odom=self.create_publisher(Odometry,'/navcar/state_estimation',10)
             self.feedback=self.create_publisher(ChassisFeedback,'/hw/chassis_feedback',10)
             self.feedback_seq=0;self.authority_epoch=1;self.control_allowed=True
-            self.tf=TransformBroadcaster(self);self.enabled=True
+            self.tf=TransformBroadcaster(self);self.enabled=True;self.prediction_fault=False
             self.last_grid=None;self.raw_commands=[]
             self.create_subscription(OccupancyGrid,'/local_costmap/costmap',self.grid,10)
             self.create_subscription(TwistStamped,'/navcar/cmd_vel_auto',lambda m:self.raw_commands.append([m.twist.linear.x,m.twist.linear.y,m.twist.angular.z]),10)
@@ -134,7 +134,7 @@ def main():
             if not self.enabled:return
             with mcu.lock:xy=mcu.position.copy();velocity=mcu.velocity.copy()
             now=self.get_clock().now().to_msg()
-            self.cloud.publish(encode(world_odom_points,'navcar_odom',now))
+            self.cloud.publish(encode(world_odom_points[:1] if self.prediction_fault else world_odom_points,'navcar_odom',now))
             sensor_map=truth@sensor_pose(*xy)
             lidar=ray_endpoints(sensor_map)
             body=lidar+np.array([-.011,-.02329,.04412])
@@ -181,12 +181,32 @@ def main():
         recovered=state['navigation']['pose']
         expected=transform(np.array([[.00318,-.02329,0.]]),truth)[0]
         assert np.linalg.norm([recovered['x']-expected[0],recovered['y']-expected[1]])<.06,(recovered,expected)
-        info=api(8080,'/api/map');target={'x':float(expected[0]+.6),'y':float(expected[1]+.25),'map_revision':info['revision']}
+        info=api(8080,'/api/map');target={'x':float(expected[0]+.9),'y':float(expected[1]+.35),'map_revision':info['revision']}
         api(8080,'/api/navigation/plan',target)
         wait_for(lambda:api(8080,'/api/state')['navigation']['plan']['status']=='ready',10,'Path preview')
         api(8080,'/api/navigation/goal',target)
         wait_for(lambda:any(math.hypot(x,y)>.02 for _,x,y,*_ in mcu.commands),20,'FDDP -> leased ROS -> synthetic native UART motion')
-        time.sleep(2)
+        # Force real MPC/relay rejection for longer than controller patience,
+        # with actual feedback, body scan and odometry still arriving.
+        sensors.prediction_fault=True
+        paused=wait_for(lambda:(n if (n:=api(8080,'/api/state')['navigation'])['goal_pending'] and n['retry_count']>0 else None),5,'Controller abort retains destination beyond 0.3 s')
+        assert paused['goal']['x']==target['x'] and paused['goal']['y']==target['y']
+        wait_for(lambda:math.hypot(mcu.commands[-1][1],mcu.commands[-1][2])<1e-5,3,'Invalid prediction stops UART target')
+        time.sleep(.35)
+        assert api(8080,'/api/state')['navigation']['goal_pending']
+        sensors.prediction_fault=False
+        wait_for(lambda:api(8080,'/api/state')['navigation']['status']=='active' and not api(8080,'/api/state')['navigation']['auto_resume_pending'],45,'Controller recovery replans original destination')
+        arrived=wait_for(lambda:(n if (n:=api(8080,'/api/state')['navigation'])['status']=='succeeded' else None),45,'Original blocked destination eventually reached')
+        assert not arrived['goal_pending'] and not arrived['auto_resume_pending']
+        original_arrival_error=math.hypot(arrived['pose']['x']-target['x'],arrived['pose']['y']-target['y'])
+        assert original_arrival_error<.06,original_arrival_error
+        time.sleep(.3)
+        assert math.hypot(mcu.commands[-1][1],mcu.commands[-1][2])<1e-5
+        current=api(8080,'/api/state')['navigation']['pose']
+        next_goal={'x':current['x']+.9,'y':current['y']+.2,'map_revision':api(8080,'/api/map')['revision']}
+        next_started=time.monotonic();api(8080,'/api/navigation/goal',next_goal)
+        wait_for(lambda:any(t>next_started and math.hypot(x,y)>.02 for t,x,y,*_ in mcu.commands),20,'New mission before localization-loss tests')
+        time.sleep(1)
         sensors.enabled=False;failure_at=time.monotonic()
         wait_for(lambda:api(8080,'/api/state')['navigation'].get('auto_resume_pending'),8,'Lost localization retains goal')
         time.sleep(.4)
@@ -213,7 +233,7 @@ def main():
         wait_for(lambda:api(8080,'/api/state')['navigation']['localized'],45,'Localization after manual takeover')
         time.sleep(.5)
         state=api(8080,'/api/state')['navigation']
-        assert state['status'] not in ('active','sending') and not state['auto_resume_pending']
+        assert state['status'] not in ('active','sending','waiting') and not state['auto_resume_pending'] and not state['goal_pending']
         assert math.hypot(mcu.commands[-1][1],mcu.commands[-1][2])<1e-5
         assert max(math.hypot(c[1],c[2]) for c in mcu.commands)<=.50001
         # A new explicitly requested task is allowed after hardware authority
@@ -226,6 +246,14 @@ def main():
         wait_for(lambda:api(8080,'/api/state')['navigation']['status']=='succeeded',30,'Explicit goal arrival and stop')
         time.sleep(.3)
         assert math.hypot(mcu.commands[-1][1],mcu.commands[-1][2])<1e-5,'Arrival must release motion'
+        blocked={'x':api(8080,'/api/state')['navigation']['pose']['x']+.3,'y':api(8080,'/api/state')['navigation']['pose']['y'],'map_revision':api(8080,'/api/map')['revision']}
+        sensors.prediction_fault=True;api(8080,'/api/navigation/goal',blocked)
+        wait_for(lambda:(n:=api(8080,'/api/state')['navigation'])['goal_pending'] and n['status']=='waiting',8,'Blocked mission remains waiting and cancelable')
+        api(8080,'/api/navigation/cancel',{});sensors.prediction_fault=False
+        time.sleep(2)
+        canceled=api(8080,'/api/state')['navigation']
+        assert not canceled['goal_pending'] and not canceled['auto_resume_pending'] and canceled['status']=='canceled',canceled
+        assert math.hypot(mcu.commands[-1][1],mcu.commands[-1][2])<1e-5
         api(8080,'/api/mode',{'mode':'idle'})
         wait_for(lambda:(s:=api(8080,'/api/state'))['mode']=='idle' and not s['switching'],20,'Navigation stack stops')
         updated=yaml.safe_load(robot.read_text());updated['navigation']['max_speed_mps']=.15;updated['navigation']['mpc']['tau_x_s']=.4
@@ -237,10 +265,10 @@ def main():
         position=state['navigation']['pose'];api(8080,'/api/navigation/goal',{'x':position['x']+.12,'y':position['y'],'map_revision':api(8080,'/api/map')['revision']})
         wait_for(lambda:api(8080,'/api/state')['navigation']['status']=='succeeded',30,'Reloaded limits permit goal arrival')
         assert api(8081,'/api/state')['navigation_max_speed_mps']==.15,'UART used stale safety limit'
-        result={'global_pose_error_m':float(np.linalg.norm([recovered['x']-expected[0],recovered['y']-expected[1]])),
+        result={'original_blocked_goal_arrival_error_m':original_arrival_error,'controller_failure_retry_count':paused['retry_count'],'global_pose_error_m':float(np.linalg.norm([recovered['x']-expected[0],recovered['y']-expected[1]])),
                 'native_commands':len(mcu.commands),'max_command_speed_mps':max(math.hypot(c[1],c[2]) for c in mcu.commands),
                 'checks':['automatic unknown-pose GICP','FDDP activation','time-indexed predictions','synthetic measured feedback','Web preview/goal','native CRC/ACK transport',
-                          'localization loss stops','automatic replan/resume','explicit retry RPC and resume','manual takeover revokes lease','new explicit goal reaches target and stops','65-page stop capacity','orphan lease expires and reacquires','mode switch reloads MPC and UART limits']}
+                          'localization loss stops','automatic replan/resume','explicit retry RPC and resume','manual takeover revokes lease','new explicit goal reaches target and stops','65-page stop capacity','orphan lease expires and reacquires','mode switch reloads MPC and UART limits','controller failure retains target beyond patience','original blocked destination reached and stopped','replan and continue to destination after recovery','cancel while waiting prevents restart']}
         (runtime/'integration-result.json').write_text(json.dumps(result,indent=2))
         print(json.dumps(result),flush=True)
     except Exception:

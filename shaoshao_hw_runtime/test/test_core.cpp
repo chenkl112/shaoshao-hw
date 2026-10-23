@@ -84,8 +84,8 @@ void tasks(const fs::path& root){
   rejects([&]{t.request_plan(goal,10);},"Propagate planning transport failure");
   require(t.plan["status"].asString()=="failed","Failed plan must not remain pending");
   t.hooks.goal=[](auto,const auto&){throw std::runtime_error("lease unavailable");};
-  rejects([&]{t.request_goal(goal,10);},"Propagate control lease failure");
-  require(t.nav_status=="failed"&&!t.active(),"Failed goal must not remain active");
+  t.request_goal(goal,10);
+  require(t.nav_status=="waiting"&&t.goal_pending&&!t.active(),"Accepted destination survives initial control transport failure");
   t.hardware(true,0);t.nav_status="active";t.resume=goal;t.hardware(true,1);
   require(t.nav_status=="canceling"&&!t.resume,"Authority epoch zero is valid: 0 -> 1 must cancel and revoke deferred resume");
 }
@@ -111,14 +111,14 @@ void automatic_retry(const fs::path& root){
   auto maps=root/"retry-map";save_grid(maps,100,100,.025,Point::Zero(),std::vector<int8_t>(10000,0));
   Tasks t(maps);t.mode="navigation";t.localized=t.hardware_ready=t.nav_server=t.stack_ready=t.serial_ready=true;t.pose["yaw"]=0;t.localization["state"]="tracking";
   auto fresh=[&](double at){t.cloud_at=t.odom_at=t.pose_at=t.serial_at=at;};fresh(10);
-  Json::Value goal;goal["x"]=1.;goal["y"]=1.;goal["map_revision"]=saved_map(maps).info["revision"];t.resume=goal;
+  Json::Value goal;goal["x"]=1.;goal["y"]=1.;goal["map_revision"]=saved_map(maps).info["revision"];t.resume=goal;t.goal=goal;t.goal_pending=true;t.nav_status="waiting";
   int attempts=0;t.hooks.plan=[&](auto,const auto&){++attempts;throw std::runtime_error("planner unavailable");};
   t.tick(10);require(t.resume&&attempts==1,"Resume must retain its goal on planner transport failure");
   t.tick(10.1);require(attempts==1,"Resume transport retry is backed off");
   t.hooks.plan=[&](auto,const auto&){++attempts;};fresh(15);t.tick(15);
   t.plan_result(t.plan_generation,{Eigen::Vector2d(1,1)});
   t.hooks.goal=[](auto,const auto&){throw std::runtime_error("UART lease busy");};t.tick(15.1);
-  require(t.resume&&t.nav_status=="failed","UART acquire failure cannot escape timer or discard the deferred goal");
+  require(t.resume&&t.nav_status=="waiting","UART acquire failure cannot escape timer or discard the deferred goal");
   fresh(21);t.tick(21);t.plan_result(t.plan_generation,{Eigen::Vector2d(1,1)});
   t.hooks.goal=[](auto,const auto&){};t.tick(21.1);require(t.resume&&t.nav_status=="sending","Keep deferred target until asynchronous goal acceptance");
   t.goal_response(t.goal_generation,false);require(t.resume.has_value(),"Async rejection preserves retry target");
@@ -126,6 +126,52 @@ void automatic_retry(const fs::path& root){
   require(!t.resume&&t.nav_status=="active","Accepted retry clears only its own deferred target");
   t.hooks.cancel=[](){throw std::runtime_error("action disconnected");};t.cancel();
   require(!t.enabled(27.1)&&t.nav_status=="canceling","Cancel transport failure must still disable motion");
+}
+
+void persistent_destination(const fs::path& root){
+  auto maps=root/"persistent-map";save_grid(maps,100,100,.025,Point::Zero(),std::vector<int8_t>(10000,0));
+  Tasks t(maps);t.mode="navigation";t.localized=t.hardware_ready=t.nav_server=t.stack_ready=t.serial_ready=true;
+  t.pose["yaw"]=0;t.localization["state"]="tracking";t.hardware(true,1);
+  auto fresh=[&](double at){t.cloud_at=t.odom_at=t.pose_at=t.serial_at=at;};fresh(10);
+  Json::Value goal;goal["x"]=1.;goal["y"]=1.;goal["map_revision"]=saved_map(maps).info["revision"];
+  int goals=0,plans=0;t.hooks.goal=[&](auto,const auto&){++goals;};t.hooks.plan=[&](auto,const auto&){++plans;};t.hooks.cancel=[]{};
+  t.request_goal(goal,10);t.goal_response(t.goal_generation,true,10);
+  for(int i=0;i<15;++i){
+    double now=11+i*3;fresh(now);auto previous=t.goal_generation;
+    t.goal_result(previous,"failed","Blocked MPC rollout",now);
+    require(t.goal_pending&&t.nav_status=="waiting"&&!t.enabled(now),"Controller abort pauses the mission and disables output");
+    rejects([&]{t.request_goal(goal,now);},"Waiting mission cannot be replaced without canceling");
+    t.tick(now+.1);require(plans==i,"Retries must not busy-loop while blocked");
+    fresh(now+1.1);t.tick(now+1.1);t.plan_result(t.plan_generation,{Eigen::Vector2d(1,1)});t.tick(now+1.2);
+    require(t.goal_generation>previous,"Each retry owns a fresh action generation");
+    t.goal_result(previous,"succeeded","Obsolete result",now+1.25);require(t.goal_pending,"Old action result cannot complete current mission");
+    t.goal_response(t.goal_generation,true,now+1.3);
+    require(t.goal_pending&&t.nav_status=="active","Accepted retry remains a pending destination until actual arrival");
+  }
+  require(goals==16&&t.retry_count>=15,"Repeated failures beyond progress timeout never discard the target");
+  t.goal_result(t.goal_generation,"succeeded","Arrived",60);fresh(1000);t.tick(1000);
+  require(!t.goal_pending&&!t.resume&&goals==16,"Arrival permanently completes the mission");
+  t.request_goal(goal,1000);t.goal_response(t.goal_generation,true,1000);auto old=t.goal_generation;
+  t.goal_result(old,"failed","Blocked",1000.1);t.cancel(false,1000.2);fresh(2000);t.tick(2000);
+  t.goal_response(old,true,2000);require(!t.goal_pending&&!t.resume&&t.nav_status=="canceled","Explicit cancel while waiting defeats late responses and future retry");
+  t.request_goal(goal,2000);t.goal_response(t.goal_generation,true,2000);
+  t.hardware(false,1);require(t.goal_pending&&t.resume,"Missing actual feedback preserves destination with output disabled");
+  t.goal_result(t.goal_generation,"canceled","Paused",2000.1);t.hardware(true,1);
+  t.hooks.plan=[](auto,const auto&){throw std::runtime_error("No path");};fresh(2002);t.tick(2002);
+  require(t.goal_pending&&t.resume,"A failed replan preserves destination indefinitely");
+  t.hardware(false,1,true);t.hardware(true,1);fresh(3000);t.tick(3000);
+  require(!t.goal_pending&&!t.resume,"Explicit hardware revoke terminates the destination even without an epoch change");
+  t.hooks.plan=[&](auto,const auto&){++plans;};t.request_goal(goal,3000);auto canceled=t.goal_generation;
+  t.pause("No response",3000.1);fresh(3004);t.tick(3004);
+  require(t.goal_generation!=canceled&&t.goal_pending&&t.nav_status=="waiting","Unacknowledged cancellation is bounded without ending mission");
+  t.goal_response(canceled,true,3004);require(t.nav_status=="waiting","Late acceptance after cancellation timeout cannot re-arm an old goal");
+  t.cancel(false,3004.1);fresh(4000);t.request_goal(goal,4000);t.goal_response(t.goal_generation,true,4000);
+  fs::rename(maps/"site.yaml",maps/"site-unavailable.yaml");t.tick(4000.1);fresh(4004);t.tick(4004);
+  require(t.goal_pending&&t.nav_status=="waiting","Missing map must not block cancellation deadlines or discard destination");
+  t.cancel(false,4004.1);require(!t.goal_pending&&t.nav_status=="canceled","Waiting for map must remain explicitly cancelable");
+  fs::rename(maps/"site-unavailable.yaml",maps/"site.yaml");fresh(5000);t.request_goal(goal,5000);t.goal_response(t.goal_generation,true,5000);
+  save_grid(maps,100,100,.025,Point::Zero(),std::vector<int8_t>(10000,0));t.tick(5000.1);
+  require(!t.goal_pending&&!t.resume,"Changed map terminates the old coordinate target");
 }
 void map_snapshot_and_reload(const fs::path& root,const fs::path& source,const fs::path& self){
   auto runtime=root/"managed",maps=root/"managed-map";fs::create_directories(runtime/"shaoshao/web_panel");
@@ -157,6 +203,6 @@ int main(int argc,char** argv){
     while(!stopped)std::this_thread::sleep_for(std::chrono::milliseconds(10));return 0;
   }
   if(argc!=2){std::cerr<<"Provide repository root\n";return 2;}auto root=fs::temp_directory_path()/("hw-native-"+std::to_string(getpid()));fs::create_directories(root);
-  try{localization();indices(root);uart();configurations(root,fs::absolute(argv[1]));processes(root);tasks(root);serial_recovery();automatic_retry(root);map_snapshot_and_reload(root,fs::absolute(argv[1]),fs::absolute(argv[0]));fs::remove_all(root);std::cout<<"Native localization, index, UART, configuration, process and task tests passed\n";}
+  try{localization();indices(root);uart();configurations(root,fs::absolute(argv[1]));processes(root);tasks(root);serial_recovery();automatic_retry(root);persistent_destination(root);map_snapshot_and_reload(root,fs::absolute(argv[1]),fs::absolute(argv[0]));fs::remove_all(root);std::cout<<"Native localization, index, UART, configuration, process and task tests passed\n";}
   catch(const std::exception& e){std::cerr<<e.what()<<"; evidence: "<<root<<'\n';return 1;}
 }

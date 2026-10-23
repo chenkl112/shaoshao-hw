@@ -53,7 +53,8 @@ public:
       hw_omni::ChassisSample sample;sample.stamp=seconds(msg->header.stamp);sample.sequence=msg->seq;sample.authority_epoch=msg->authority_epoch;
       sample.control_allowed=msg->control_allowed;sample.vx=msg->vx_mps;sample.vy=msg->vy_mps;sample.omega=msg->chassis_omega_radps;sample.gimbal_yaw=msg->gimbal_relative_yaw_rad;sample.frame=msg->header.frame_id;
       std::lock_guard<std::recursive_mutex> lock(tasks_.mutex);gate_.update(sample,node_->now().seconds());
-      tasks_.hardware(gate_.ready(node_->now().seconds()),gate_.sample()?gate_.sample()->authority_epoch:0);
+      tasks_.hardware(gate_.ready(node_->now().seconds()),gate_.sample()?gate_.sample()->authority_epoch:0,
+                      gate_.sample()&&!gate_.sample()->control_allowed);
     });
     odometry_=node_->create_subscription<nav_msgs::msg::Odometry>("/navcar/state_estimation",10,[this](nav_msgs::msg::Odometry::SharedPtr msg){odom(*msg,true);});
     mapping_odom_=node_->create_subscription<nav_msgs::msg::Odometry>("/state_estimation",10,[this](nav_msgs::msg::Odometry::SharedPtr msg){odom(*msg,false);});
@@ -121,8 +122,9 @@ public:
       if(revision!=lease_revision_)return; // Snapshot predates a lease acquire/release.
       tasks_.serial_ready=v["connected"].asBool()&&v["error"].asString().empty();tasks_.serial_at=steady();
       uint64_t epoch=v["manual_epoch"].asUInt64();bool changed=manual_epoch_&&*manual_epoch_!=epoch;manual_epoch_=epoch;
-      if(changed||(!lease_.empty()&&v["control_source"].asString()!="navigation")){tasks_.cancel();tasks_.clear_resume();release();}
-    }catch(const std::exception&){std::lock_guard<std::recursive_mutex> lock(tasks_.mutex);if(revision!=lease_revision_)return;tasks_.serial_ready=false;if(tasks_.active())tasks_.cancel();}
+      if(changed){tasks_.cancel();release();}
+      else if(!tasks_.serial_ready||(!lease_.empty()&&v["control_source"].asString()!="navigation")){tasks_.pause("串口或导航租约暂不可用");release();}
+    }catch(const std::exception&){std::lock_guard<std::recursive_mutex> lock(tasks_.mutex);if(revision!=lease_revision_)return;tasks_.serial_ready=false;tasks_.pause("串口服务暂不可用");release();}
   }
 private:
   Json::Value request(const std::string& path,const std::optional<Json::Value>& body=std::nullopt){
@@ -143,7 +145,7 @@ private:
   }
   void navigate(uint64_t id,const Json::Value& goal){
     if(!navigator_->action_server_is_ready())throw std::runtime_error("导航服务未就绪");
-    release();Json::Value acquire(Json::objectValue);if(manual_epoch_)acquire["manual_epoch"]=Json::UInt64(*manual_epoch_);
+    release();goal_handle_.reset();Json::Value acquire(Json::objectValue);if(manual_epoch_)acquire["manual_epoch"]=Json::UInt64(*manual_epoch_);
     auto acquired=request("/api/navigation/acquire",acquire);lease_=acquired["lease"].asString();++lease_revision_;
     if(acquired["manual_epoch"].isUInt64())manual_epoch_=acquired["manual_epoch"].asUInt64();
     if(lease_.empty())throw std::runtime_error("控制器未返回导航控制权");
@@ -152,12 +154,12 @@ private:
     options.goal_response_callback=[this,id](auto handle){
       std::lock_guard<std::recursive_mutex> lock(tasks_.mutex);
       if(id!=tasks_.goal_generation){if(handle)navigator_->async_cancel_goal(handle);return;}
-      goal_handle_=handle;tasks_.goal_response(id,bool(handle));if(!handle)release();
+      goal_handle_=handle;tasks_.goal_response(id,bool(handle),steady());if(!handle)release();
     };
     options.feedback_callback=[this,id](auto,const auto feedback){std::lock_guard<std::recursive_mutex> lock(tasks_.mutex);if(id==tasks_.goal_generation&&std::isfinite(feedback->distance_remaining))tasks_.remaining=feedback->distance_remaining;};
     options.result_callback=[this,id](const auto& result){
       std::lock_guard<std::recursive_mutex> lock(tasks_.mutex);if(id!=tasks_.goal_generation)return;
-      auto code=result.code;tasks_.goal_result(id,code==rclcpp_action::ResultCode::SUCCEEDED?"succeeded":code==rclcpp_action::ResultCode::CANCELED?"canceled":"failed",code==rclcpp_action::ResultCode::SUCCEEDED?"已到达目标":code==rclcpp_action::ResultCode::CANCELED?"导航已取消":"导航失败");goal_handle_.reset();release();};
+      auto code=result.code;tasks_.goal_result(id,code==rclcpp_action::ResultCode::SUCCEEDED?"succeeded":code==rclcpp_action::ResultCode::CANCELED?"canceled":"failed",code==rclcpp_action::ResultCode::SUCCEEDED?"已到达目标":code==rclcpp_action::ResultCode::CANCELED?"导航已取消":"当前路线暂不可执行",steady());goal_handle_.reset();release();};
     try{navigator_->async_send_goal(g,options);}catch(...){release();throw;}
   }
   void cancel(){if(goal_handle_)try{navigator_->async_cancel_goal(goal_handle_);}catch(const rclcpp_action::exceptions::UnknownGoalHandleError&){goal_handle_.reset();}}
@@ -187,7 +189,8 @@ private:
   }
   void tick(){
     std::lock_guard<std::recursive_mutex> lock(tasks_.mutex);double wall=steady(),clock=node_->now().seconds();
-    tasks_.hardware(gate_.ready(clock),gate_.sample()?gate_.sample()->authority_epoch:0);
+    tasks_.hardware(gate_.ready(clock),gate_.sample()?gate_.sample()->authority_epoch:0,
+                    gate_.sample()&&!gate_.sample()->control_allowed);
     if(tasks_.mode!="navigation"||tasks_.switching){if(!lease_.empty()){cancel();release();}return;}
     // Cancel and retain the goal before Nav2's controller patience expires.
     // Waiting for the global correction timeout loses the action result first.

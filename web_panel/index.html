@@ -231,7 +231,7 @@ function drawNavigationOverlay(){
    }
   }
  }
- const nav=lastState?.navigation,active=['sending','active','canceling'].includes(nav?.status);
+ const nav=lastState?.navigation,active=['sending','active','canceling','waiting'].includes(nav?.status);
  const plan=matchingPlan(),path=active?nav.path:plan?.status==='ready'?plan.path:[];
  if(path?.length){
   mapCtx.strokeStyle='#168de2';mapCtx.lineWidth=3;mapCtx.lineJoin='round';mapCtx.beginPath();
@@ -256,7 +256,7 @@ function drawMap(){
    if(!localized){mapCtx.fillStyle='#f3aa52';mapCtx.font='12px system-ui';mapCtx.fillText('位置待确认',x+16,y+18)}
   }
   const active=lastState?.navigation;
-  if(active?.goal&&['sending','active','canceling'].includes(active.status))goalMarker(active.goal,'#f48c70','导航目标');
+  if(active?.goal&&['sending','active','canceling','waiting'].includes(active.status))goalMarker(active.goal,'#f48c70','导航目标');
   if(selectedGoal)goalMarker(selectedGoal,'#f2d36e','选定位置');
  }
 }
@@ -290,16 +290,16 @@ async function previewGoal(){
  finally{if(request===planRequest){navigationControls();drawMap()}}
 }
 function navigationControls(){
- const nav=lastState?.navigation,busy=['sending','active','canceling'].includes(nav?.status);
+ const nav=lastState?.navigation,busy=['sending','active','canceling','waiting'].includes(nav?.status);
  const plan=matchingPlan();
  $('selectedGoal').textContent=selectedGoal?'目标：'+selectedGoal.x.toFixed(2)+', '+selectedGoal.y.toFixed(2)+' m':'未选择目标 · 请单击地图';
  $('goGoal').disabled=!connected||!!lastState?.preview||!nav?.ready||!selectedGoal||!mapImage||plan?.status!=='ready'||!!planError||goalRequest||busy||requesting;
- $('cancelGoal').disabled=!connected||goalRequest||(!busy&&!nav?.auto_resume_pending)||nav?.status==='canceling';
+ $('cancelGoal').disabled=!connected||goalRequest||(!busy&&!nav?.auto_resume_pending)||(nav?.status==='canceling'&&!nav?.goal_pending);
  $('retryLocalization').disabled=!connected||goalRequest||lastState?.mode!=='navigation';
  let message=!connected?'网页连接断开':nav?.reason||(lastState?.preview?'当前仅可查看地图，自动导航尚未启动':'导航就绪 · 选择目标后点击“前往目标”');
  if(nav&&nav.status!=='idle')message+=' · '+nav.message;
  if(nav?.ready&&nav?.localization?.state==='degraded')message+=' · 定位退化，低速衔接';
- if(nav?.auto_resume_pending)message+=' · 定位恢复后将重新规划原目标，可点击取消';
+ if(nav?.auto_resume_pending)message+=' · 等待条件恢复后重新规划原目标，直到到达；可点击取消';
  if(selectedGoal&&!busy)message+=' · '+(planError||plan?.message||'正在请求路径预览…');
  if(nav?.status==='active'&&Number.isFinite(nav.distance_remaining))message+=' · 剩余 '+nav.distance_remaining.toFixed(2)+' m';
  $('navStatus').textContent=message;
