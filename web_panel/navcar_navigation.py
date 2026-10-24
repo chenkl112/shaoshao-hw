@@ -62,7 +62,7 @@ def build_navigation_config(root,maps,initial_pose=None):
     params['hw_command_relay']={'ros__parameters':{
         'max_speed_mps':speed,'deceleration_mps2':min(nav['motion']['acceleration_mps2'],nav['motion']['deceleration_mps2']),
         'jerk_mps3':nav['motion']['jerk_mps3'],'collision_radius_m':frames['robot_radius_m']+.02,
-        'feedback_timeout_s':nav['mpc']['feedback_timeout_s']}}
+        'authority_timeout_s':nav['mpc']['authority_timeout_s'],'lio_timeout_s':nav['mpc']['lio_timeout_s'],'lio_velocity_std_limit_mps':nav['mpc']['lio_velocity_std_limit_mps']}}
     (output/'frames.yaml').write_text(yaml.safe_dump(frames,sort_keys=False))
     (output/'nav2.yaml').write_text(yaml.safe_dump(params,sort_keys=False))
     return output

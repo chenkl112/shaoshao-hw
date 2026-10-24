@@ -1,6 +1,6 @@
 # 哨哨 HW 上车部署
 
-适用 Ubuntu 24.04 / ROS 2 Jazzy、MID360、四轮全向底盘。UART1 已同步 [Navcar V2](NavcarV2接入.md)：指令使用 SI 单位，反馈为底盘系轮速反解速度和云台惯导角。协议尚缺硬件控制权、采样时间和云台相对底盘角，原始反馈不直接送入导航 MPC。旧 V1 通过独立配置保留兼容。源码放在 `~/ccc/shaoshao-hw`，运行文件放在 `~/ccc/shaoshao-hw-runtime`，地图放在 `~/scurm_maps/shaoshao-hw`。不覆盖旧工程的源码、配置或地图。
+适用 Ubuntu 24.04 / ROS 2 Jazzy、MID360、四轮全向底盘。UART1 已同步 [Navcar V2](NavcarV2接入.md)：指令使用 SI 单位，反馈为底盘系轮速反解速度和云台惯导角。运动估计已改用 [FAST-LIO 融合速度](FASTLIO速度预测.md)，原始轮速不参与导航预测；拨杆授权独立接入。旧 V1 通过独立配置保留兼容。源码放在 `~/ccc/shaoshao-hw`，运行文件放在 `~/ccc/shaoshao-hw-runtime`，地图放在 `~/scurm_maps/shaoshao-hw`。不覆盖旧工程的源码、配置或地图。
 
 ## 安装与构建
 
@@ -34,7 +34,7 @@ bash deployment/bootstrap.sh
 4. 用 `ls -l /dev/serial/by-id/` 确认串口。必要时 `sudo usermod -aG dialout "$USER"` 后重新登录。
 5. 确认下位机使用 2,000,000 baud，并对失去指令做停车处理；V2 平移不再乘十，旋转逆时针为正。横移、制动和 yaw 保持效果需实测。
 
-本版需要 `/hw/chassis_feedback` 的真实 XY 速度、底盘角速度、云台相对角与硬件控制权。C++ V2 适配器发布 `/hw/navcar/feedback`，其中时间戳表示主机接收时刻。它不能替代满足同步、雷达坐标和硬件授权要求的 `/hw/chassis_feedback`；没有后者时导航保持停车。上位机发 SI 单位整车目标，电控完成坐标转换、四轮分配和电机闭环。小陀螺与平移各自有超时，在 V2 控制帧中合并发送。原 V1 目标回显不能代替实测。
+本版使用 FAST-LIO 融合速度，经中心点补偿发布 `/navcar/odom`，作为唯一运动状态。C++ V2 适配器发布 `/hw/navcar/feedback` 供诊断，不用于速度预测。真实硬件授权需通过 `/hw/control_authority` 独立提供；没有授权时导航保持停车。上位机发 SI 单位整车目标，电控完成坐标转换、四轮分配和电机闭环。小陀螺与平移各自有超时，在 V2 控制帧中合并发送。原 V1 目标回显不能代替实测。
 
 ## 启动、建图与导航
 

@@ -21,7 +21,8 @@ public:
     relay_.deceleration=declare_parameter("deceleration_mps2",.3);
     relay_.jerk=declare_parameter("jerk_mps3",1.);
     relay_.radius=declare_parameter("collision_radius_m",.317658);
-    relay_.feedback=hw_omni::FeedbackGate(declare_parameter("feedback_timeout_s",.15));
+    relay_.authority=hw_omni::AuthorityGate(declare_parameter("authority_timeout_s",.15));
+    relay_.motion=hw_omni::MotionGate(declare_parameter("lio_timeout_s",.15),declare_parameter("lio_velocity_std_limit_mps",.5));
     if(!std::isfinite(relay_.max_speed)||relay_.max_speed<=0||relay_.max_speed>.5||
        !std::isfinite(relay_.deceleration)||relay_.deceleration<=0||!std::isfinite(relay_.jerk)||
        relay_.jerk<=0||!std::isfinite(relay_.radius)||relay_.radius<=0)
@@ -34,8 +35,8 @@ public:
         if(msg->header.frame_id=="navcar_center")relay_.update_session(
           {hw_omni::seconds(msg->header.stamp),msg->lease,msg->authority_epoch,msg->enabled},now().seconds());
       });
-    feedback_sub_=create_subscription<shaoshao_hw_interfaces::msg::ChassisFeedback>("/hw/chassis_feedback",10,
-      [this](shaoshao_hw_interfaces::msg::ChassisFeedback::SharedPtr msg){relay_.update_feedback(hw_omni::chassis_sample(*msg),now().seconds());});
+    authority_sub_=create_subscription<shaoshao_hw_interfaces::msg::ControlAuthority>("/hw/control_authority",10,
+      [this](shaoshao_hw_interfaces::msg::ControlAuthority::SharedPtr msg){relay_.update_authority(hw_omni::authority_sample(*msg),now().seconds());});
     velocity_sub_=create_subscription<geometry_msgs::msg::TwistStamped>("/navcar/cmd_vel_auto",1,
       [this](geometry_msgs::msg::TwistStamped::SharedPtr msg){
         if(msg->header.frame_id!="navcar_center"||msg->twist.angular.z!=0||msg->twist.linear.z!=0||
@@ -46,10 +47,7 @@ public:
       });
     odom_sub_=create_subscription<nav_msgs::msg::Odometry>("/navcar/odom",10,
       [this](nav_msgs::msg::Odometry::SharedPtr msg){
-        double stamp=hw_omni::seconds(msg->header.stamp),age=now().seconds()-stamp;
-        if(msg->child_frame_id=="navcar_center"&&age>=-.05&&age<=.15&&stamp>odom_stamp_&&std::isfinite(msg->twist.twist.angular.z)){
-          odom_stamp_=stamp;radar_omega_=msg->twist.twist.angular.z;
-        }
+        relay_.update_motion(hw_omni::motion_sample(*msg),now().seconds());
       });
     localization_sub_=create_subscription<shaoshao_hw_interfaces::msg::LocalizationStatus>("/hw/localization/state",10,
       [this](shaoshao_hw_interfaces::msg::LocalizationStatus::SharedPtr msg){
@@ -76,14 +74,13 @@ private:
   rclcpp::Publisher<shaoshao_hw_interfaces::msg::NavCommand>::SharedPtr command_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
   rclcpp::Subscription<shaoshao_hw_interfaces::msg::NavigationSession>::SharedPtr session_sub_;
-  rclcpp::Subscription<shaoshao_hw_interfaces::msg::ChassisFeedback>::SharedPtr feedback_sub_;
+  rclcpp::Subscription<shaoshao_hw_interfaces::msg::ControlAuthority>::SharedPtr authority_sub_;
   rclcpp::Subscription<shaoshao_hw_interfaces::msg::LocalizationStatus>::SharedPtr localization_sub_;
   rclcpp::Subscription<shaoshao_hw_interfaces::msg::PredictedObstacles>::SharedPtr prediction_sub_;
   rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr velocity_sub_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr grid_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
-  double radar_omega_=0,odom_stamp_=0;
   void grid(nav_msgs::msg::OccupancyGrid::SharedPtr msg){
     double stamp=hw_omni::seconds(msg->header.stamp),age=now().seconds()-stamp;
     if(stamp<=relay_.grid_stamp)return;
@@ -107,15 +104,9 @@ private:
     try{
       auto pose=buffer_->lookupTransform("map","navcar_center",tf2::TimePointZero);
       double stamp=hw_omni::seconds(pose.header.stamp);
-      if(current.seconds()-stamp>=-.05&&current.seconds()-stamp<=.15&&
-         current.seconds()-odom_stamp_>=-.05&&current.seconds()-odom_stamp_<=.15&&relay_.feedback.sample()){
-        relay_.position=hw_omni::U(pose.transform.translation.x,pose.transform.translation.y);
-        double yaw=tf2::getYaw(pose.transform.rotation),age=std::max(0.0,current.seconds()-stamp);
-        const auto& measured=*relay_.feedback.sample();
-        relay_.feedback_yaw=yaw+radar_omega_*(measured.stamp-stamp);
-        double c=std::cos(relay_.feedback_yaw),s=std::sin(relay_.feedback_yaw);
-        relay_.position+=age*hw_omni::U(c*measured.vx-s*measured.vy,s*measured.vx+c*measured.vy);
-        relay_.yaw=yaw+radar_omega_*age;relay_.pose_stamp=std::min(stamp,odom_stamp_);
+      if(current.seconds()-stamp>=-.05&&current.seconds()-stamp<=.15){
+        const auto& p=pose.transform.translation;const auto& q=pose.transform.rotation;
+        relay_.position={p.x,p.y,p.z};relay_.orientation=Eigen::Quaterniond(q.w,q.x,q.y,q.z);relay_.pose_stamp=stamp;
       }
     }catch(const tf2::TransformException&){}
     auto output=relay_.step(current.seconds());
@@ -125,7 +116,7 @@ private:
       command_pub_->publish(command);
     }
     std_msgs::msg::String status;std::ostringstream text;
-    text<<"{\"stamp_ns\":"<<current.nanoseconds()<<",\"sent_xy\":["<<output.velocity.x()<<","<<output.velocity.y()<<"],\"moving_allowed\":"
+    text<<"{\"stamp_ns\":"<<current.nanoseconds()<<",\"velocity_source\":\"fast_lio\",\"sent_xy\":["<<output.velocity.x()<<","<<output.velocity.y()<<"],\"moving_allowed\":"
       <<(output.moving?"true":"false")<<",\"reason\":\""<<output.reason<<"\"}";
     status.data=text.str();status_pub_->publish(status);
   }

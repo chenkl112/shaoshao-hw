@@ -30,10 +30,11 @@ void Planner::configure(const rclcpp_lifecycle::LifecycleNode::WeakPtr& parent,s
   mask_=std::make_shared<nav_executor::RouteTerrainMask>(nav_executor::RouteTerrainMaskParams{.6,.6,1.});
   planner_=std::make_unique<nav_executor::PathPlanner>(config_,mask_,node_->get_logger());
   publisher_=node_->create_publisher<TrajectoryMessage>("/hw/planned_trajectory",rclcpp::QoS(8).transient_local());
-  feedback_sub_=node_->create_subscription<shaoshao_hw_interfaces::msg::ChassisFeedback>("/hw/chassis_feedback",10,
-    [this](const shaoshao_hw_interfaces::msg::ChassisFeedback::SharedPtr msg){std::lock_guard<std::mutex> lock(feedback_mutex_);feedback_gate_.update(chassis_sample(*msg),node_->now().seconds());});
+  motion_=MotionGate(parameter("lio_timeout_s",.15),parameter("lio_velocity_std_limit_mps",.5));
+  odom_sub_=node_->create_subscription<nav_msgs::msg::Odometry>("/navcar/odom",10,
+    [this](const nav_msgs::msg::Odometry::SharedPtr msg){std::lock_guard<std::mutex> lock(motion_mutex_);motion_.update(motion_sample(*msg),node_->now().seconds());});
 }
-void Planner::cleanup(){planner_.reset();mask_.reset();publisher_.reset();feedback_sub_.reset();}
+void Planner::cleanup(){planner_.reset();mask_.reset();publisher_.reset();odom_sub_.reset();}
 void Planner::activate(){publisher_->on_activate();}
 void Planner::deactivate(){publisher_->on_deactivate();}
 nav_msgs::msg::Path Planner::createPlan(const geometry_msgs::msg::PoseStamped& start,const geometry_msgs::msg::PoseStamped& goal,std::function<bool()> canceled){
@@ -66,9 +67,11 @@ nav_msgs::msg::Path Planner::createPlan(const geometry_msgs::msg::PoseStamped& s
   mask_->initialize(*cost,direction);check();
   nav_executor::PlanRequest request;request.goal={++generation_,b,false};request.plan_generation=generation_;request.current_pos_map=a;
   U velocity=U::Zero();
-  {std::lock_guard<std::mutex> lock(feedback_mutex_);if(feedback_gate_.ready(node_->now().seconds())){
-    try{auto tf=tf_->lookupTransform("map",map_->getBaseFrameID(),tf2::TimePointZero);double yaw=tf2::getYaw(tf.transform.rotation),c=std::cos(yaw),s=std::sin(yaw);const auto& sample=*feedback_gate_.sample();velocity=U(c*sample.vx-s*sample.vy,s*sample.vx+c*sample.vy);}catch(const tf2::TransformException&){}
-  }}
+  {std::lock_guard<std::mutex> lock(motion_mutex_);if(!motion_.ready(node_->now().seconds()))throw nav2_core::PlannerException("FAST-LIO velocity unavailable or uncertain");
+    try{auto tf=tf_->lookupTransform("map",map_->getBaseFrameID(),tf2::TimePointZero);const auto& p=tf.transform.translation;const auto& q=tf.transform.rotation;
+      velocity=project_motion(*motion_.sample(),Eigen::Vector3d(p.x,p.y,p.z),Eigen::Quaterniond(q.w,q.x,q.y,q.z),seconds(tf.header.stamp),node_->now().seconds()).velocity;
+    }catch(const std::exception&){throw nav2_core::PlannerException("Cannot align FAST-LIO velocity to map pose");}
+  }
   U heading=velocity.norm()>.03?velocity:(b-a);
   request.current_yaw=heading.norm()>1e-9?std::atan2(heading.y(),heading.x()):0;
   request.current_velocity=velocity.norm();request.obstacles.global_static=cost;request.obstacles.hard_cost=cost;request.direction_map=direction;

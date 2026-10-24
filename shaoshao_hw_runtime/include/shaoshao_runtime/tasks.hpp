@@ -14,7 +14,7 @@ class Tasks {
 public:
   mutable std::recursive_mutex mutex;TaskHooks hooks;fs::path maps;
   std::string mode="idle",target_mode="idle",error,nav_status="idle",nav_message="请在地图上选择目标位置";
-  bool switching=false,mapping_saved=false,localized=false,nav_server=false,stack_ready=false,serial_ready=false,hardware_ready=false,hardware_seen=false;
+  bool switching=false,mapping_saved=false,localized=false,lio_ready=false,nav_server=false,stack_ready=false,serial_ready=false,hardware_ready=false,hardware_seen=false;
   double cloud_at=0,odom_at=0,pose_at=0,serial_at=0,goal_started=0,plan_started=0;uint64_t goal_generation=0,plan_generation=0,hardware_epoch=0;
   Json::Value pose,local_pose,localization,goal,path=Json::Value(Json::arrayValue),plan,remaining,motion,costmap;
   std::optional<Json::Value> resume;std::optional<uint64_t> resume_plan,resume_goal_generation;double resume_retry_at=0;
@@ -23,7 +23,7 @@ public:
   explicit Tasks(fs::path directory):maps(std::move(directory)){fs::create_directories(maps);clear_plan();costmap["available"]=false;}
   std::string reason(double now) const {
     if(switching)return "正在切换运行模式";if(mode!="navigation")return "请先点击顶部“导航”";if(!error.empty())return error;
-    if(!localized)return localization.get("message","等待自动全局定位").asString();if(!hardware_ready)return "等待有效的底盘实际速度反馈与拨杆授权";
+    if(!localized)return localization.get("message","等待自动全局定位").asString();if(!hardware_ready)return "等待拨杆控制授权";if(!lio_ready)return "等待有效的 FAST-LIO 融合速度";
     if(!nav_server||!stack_ready)return "等待 Nav2 导航服务就绪";if(!pose.isObject()||now-pose_at>1)return "地图位置更新超时";
     if(!cloud_at||!odom_at||now-cloud_at>1||now-odom_at>1)return "点云或雷达里程计已超时";
     if(!serial_ready||now-serial_at>1)return "等待下位机通讯，请确认8081控制服务已运行";return {};
@@ -60,7 +60,7 @@ public:
   }
   void mode_finished(const std::string& actual,const fs::path& directory,const std::string& failure={}){
     std::lock_guard<std::recursive_mutex> lock(mutex);mode=actual;maps=directory;switching=false;error=failure;target_mode=actual;
-    localized=false;stack_ready=false;nav_server=false;pose=Json::Value();pose_at=cloud_at=odom_at=0;clear_plan();
+    localized=false;lio_ready=false;stack_ready=false;nav_server=false;pose=Json::Value();pose_at=cloud_at=odom_at=0;clear_plan();
     ++goal_generation;goal_pending=false;retry_count=0;nav_status="idle";nav_message="请在地图上选择目标位置";goal=Json::Value();remaining=Json::Value();clear_resume();
   }
   void request_plan(const Json::Value& body,double now,bool automatic=false){
@@ -108,7 +108,7 @@ public:
   void hardware(bool ready,uint64_t epoch,bool revoked=false){
     std::lock_guard<std::recursive_mutex> lock(mutex);bool changed=hardware_seen&&hardware_epoch!=epoch;hardware_seen=true;hardware_ready=ready;hardware_epoch=epoch;
     if(revoked||changed){cancel();clear_resume();}
-    else if(!ready)pause("实际速度反馈不可用");
+    else if(!ready)pause("拨杆控制授权不可用");
   }
   void localization_state(const Json::Value& value){
     std::lock_guard<std::recursive_mutex> lock(mutex);localization=value;localized=value.get("ready",false).asBool();auto state=value.get("state","acquiring").asString();
@@ -144,7 +144,7 @@ public:
     s["point_topic"]=mode=="idle"?"/livox/lidar":"/cloud_registered";
     auto& c=s["mapping_control"];c["running"]=mode=="mapping";c["starting"]=switching&&target_mode=="mapping";c["stopping"]=switching&&mode=="mapping";c["can_start"]=!switching&&mode!="mapping";c["can_stop"]=!switching&&mode=="mapping";c["maps_dir"]=maps.string();c["saved"]=mapping_saved;c["error"]=error;c["message"]=switching?"正在切换并保存地图…":mode=="mapping"?"正在建图，可停止并保存":"待机，可开始建图";
     auto filter=mapping_filter(maps);filter["locked"]=switching||mode!="idle";filter["reference"]="开始建图时的雷达高度";s["mapping_filter"]=filter;
-    auto& n=s["navigation"];n["ready"]=why.empty();n["reason"]=why;n["status"]=nav_status;n["message"]=nav_message;n["localized"]=localized&&pose.isObject()&&now-pose_at<=1;n["localization"]=localization;n["goal"]=goal;n["plan"]=plan;n["path"]=path;n["distance_remaining"]=remaining;n["pose"]=pose.isObject()&&now-pose_at<=1?pose:Json::Value();n["motion"]=motion;n["auto_resume_pending"]=bool(resume);n["goal_pending"]=goal_pending;n["retry_count"]=Json::UInt64(retry_count);return s;
+    auto& n=s["navigation"];n["ready"]=why.empty();n["reason"]=why;n["status"]=nav_status;n["message"]=nav_message;n["localized"]=localized&&pose.isObject()&&now-pose_at<=1;n["localization"]=localization;n["goal"]=goal;n["plan"]=plan;n["path"]=path;n["distance_remaining"]=remaining;n["pose"]=pose.isObject()&&now-pose_at<=1?pose:Json::Value();n["motion"]=motion;n["velocity_source"]="fast_lio";n["velocity_ready"]=lio_ready;n["auto_resume_pending"]=bool(resume);n["goal_pending"]=goal_pending;n["retry_count"]=Json::UInt64(retry_count);return s;
   }
   Json::Value dispatch(const Json::Value& request,double now){
     std::lock_guard<std::recursive_mutex> lock(mutex);auto operation=request["operation"].asString();

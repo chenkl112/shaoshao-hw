@@ -32,7 +32,8 @@ void Controller::configure(const rclcpp_lifecycle::LifecycleNode::WeakPtr& paren
   settings_.acceleration=parameter("acceleration_mps2",0.3);settings_.jerk=parameter("jerk_mps3",1.0);
   settings_.radius=parameter("collision_radius_m",0.317658);
   settings_.obstacle_margin=parameter("obstacle_margin_m",0.15);
-  feedback_timeout_=parameter("feedback_timeout_s",0.15);
+  authority_timeout_=parameter("authority_timeout_s",0.15);
+  motion_=MotionGate(parameter("lio_timeout_s",.15),parameter("lio_velocity_std_limit_mps",.5));
   prediction_timeout_=parameter("prediction_timeout_s",0.3);
   pose_timeout_=parameter("pose_timeout_s",0.15);
   settings_.validate();
@@ -48,17 +49,13 @@ void Controller::configure(const rclcpp_lifecycle::LifecycleNode::WeakPtr& paren
         while(trajectory_cache_.size()>8)trajectory_cache_.pop_front();
       }catch(const std::exception& e){RCLCPP_WARN(node_->get_logger(),"Rejected HW trajectory: %s",e.what());}
     });
-  feedback_gate_=FeedbackGate(feedback_timeout_);
-  if(feedback_timeout_<=0||feedback_timeout_>0.2||prediction_timeout_<=0||prediction_timeout_>0.5||pose_timeout_<=0||pose_timeout_>0.3)
-    throw std::invalid_argument("Invalid controller freshness bounds");
-  feedback_sub_=node_->create_subscription<shaoshao_hw_interfaces::msg::ChassisFeedback>("/hw/chassis_feedback",10,
-      [this](shaoshao_hw_interfaces::msg::ChassisFeedback::SharedPtr msg){
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto update=feedback_gate_.update(chassis_sample(*msg),node_->now().seconds());
-        if(update==SampleUpdate::invalid){reset_unlocked();feedback_.reset();return;}
-        if(update==SampleUpdate::replayed)return;
-        if(!msg->control_allowed||(feedback_&&msg->authority_epoch!=feedback_->authority_epoch))reset_unlocked();
-        feedback_=std::move(msg);
+  authority_=AuthorityGate(authority_timeout_);
+  if(prediction_timeout_<=0||prediction_timeout_>.5||pose_timeout_<=0||pose_timeout_>.15)throw std::invalid_argument("Invalid controller freshness bounds");
+  authority_sub_=node_->create_subscription<shaoshao_hw_interfaces::msg::ControlAuthority>("/hw/control_authority",10,
+      [this](shaoshao_hw_interfaces::msg::ControlAuthority::SharedPtr msg){
+        std::lock_guard<std::mutex> lock(mutex_);auto previous=authority_.sample();
+        auto update=authority_.update(authority_sample(*msg),node_->now().seconds());
+        if(update==SampleUpdate::invalid||(update==SampleUpdate::accepted&&(!msg->control_allowed||(previous&&previous->authority_epoch!=msg->authority_epoch))))reset_unlocked();
       });
   prediction_sub_=node_->create_subscription<shaoshao_hw_interfaces::msg::PredictedObstacles>("/hw/predicted_obstacles",1,
       [this](shaoshao_hw_interfaces::msg::PredictedObstacles::SharedPtr msg){
@@ -70,8 +67,8 @@ void Controller::configure(const rclcpp_lifecycle::LifecycleNode::WeakPtr& paren
   odom_sub_=node_->create_subscription<nav_msgs::msg::Odometry>("/navcar/odom",10,
       [this](nav_msgs::msg::Odometry::SharedPtr msg){
         std::lock_guard<std::mutex> lock(mutex_);
-        if(msg->child_frame_id!=base_||!fresh(node_->now(),msg->header.stamp,pose_timeout_)||!std::isfinite(msg->twist.twist.angular.z))return;
-        last_odom_=rclcpp::Time(msg->header.stamp);radar_omega_=msg->twist.twist.angular.z;
+        auto update=motion_.update(motion_sample(*msg),node_->now().seconds());
+        if(update==SampleUpdate::invalid)reset_unlocked();
       });
   prediction_pub_=node_->create_publisher<nav_msgs::msg::Path>("/hw/mpc/prediction",1);
   status_pub_=node_->create_publisher<std_msgs::msg::String>("/hw/mpc/status",1);
@@ -80,7 +77,7 @@ void Controller::reset_unlocked(){previous_command_.setZero();previous_increment
 void Controller::reset(){std::lock_guard<std::mutex> lock(mutex_);reset_unlocked();}
 void Controller::activate(){prediction_pub_->on_activate();status_pub_->on_activate();}
 void Controller::deactivate(){std::lock_guard<std::mutex> lock(mutex_);reset_unlocked();prediction_pub_->on_deactivate();status_pub_->on_deactivate();}
-void Controller::cleanup(){trajectory_sub_.reset();trajectory_cache_.clear();trajectory_.reset();feedback_sub_.reset();prediction_sub_.reset();odom_sub_.reset();prediction_pub_.reset();status_pub_.reset();}
+void Controller::cleanup(){trajectory_sub_.reset();trajectory_cache_.clear();trajectory_.reset();authority_sub_.reset();prediction_sub_.reset();odom_sub_.reset();prediction_pub_.reset();status_pub_.reset();}
 void Controller::setPlan(const nav_msgs::msg::Path& path){
   std::lock_guard<std::mutex> lock(mutex_);
   if(path.header.frame_id!="map"||path.poses.empty())throw nav2_core::InvalidPath("Expected nonempty map path");
@@ -93,7 +90,7 @@ void Controller::setPlan(const nav_msgs::msg::Path& path){
   plan_=path;
   // Nav2 supplies a new plan to re-arm this controller. The web bridge cancels
   // obsolete actions on takeover and independently gates output by its lease.
-  if(feedback_&&feedback_->control_allowed){armed_=true;armed_epoch_=feedback_->authority_epoch;}
+  if(authority_.ready(node_->now().seconds())){armed_=true;armed_epoch_=authority_.sample()->authority_epoch;}
 }
 void Controller::setSpeedLimit(const double& speed,const bool& percentage){
   std::lock_guard<std::mutex> lock(mutex_);
@@ -110,25 +107,20 @@ geometry_msgs::msg::TwistStamped Controller::computeVelocityCommands(const geome
     reset_unlocked();std_msgs::msg::String status;status.data="{\"ready\":false,\"reason\":\""+message+"\"}";status_pub_->publish(status);
     throw nav2_core::NoValidControl(message);
   };
-  if(!feedback_||!feedback_gate_.ready(now.seconds()))return fail("Actual chassis feedback unavailable");
-  if(!armed_||armed_epoch_!=feedback_->authority_epoch)return fail("New navigation plan required after authority change");
+  if(!authority_.ready(now.seconds()))return fail("Hardware control authority unavailable");
+  if(!motion_.ready(now.seconds()))return fail("FAST-LIO velocity unavailable or uncertain");
+  if(!armed_||armed_epoch_!=authority_.sample()->authority_epoch)return fail("New navigation plan required after authority change");
   if(!predictions_||!predictions_->valid||predictions_->header.frame_id!="map"||!fresh(now,predictions_->header.stamp,prediction_timeout_))return fail("Obstacle prediction unavailable");
-  if(!fresh(now,pose.header.stamp,pose_timeout_)||(now-last_odom_).seconds()>pose_timeout_)return fail("Lidar pose or heading rate stale");
+  if(!fresh(now,pose.header.stamp,pose_timeout_))return fail("Lidar pose or heading rate stale");
   if(plan_.poses.empty())return fail("No global plan");
   geometry_msgs::msg::PoseStamped mapped=pose;
   try{if(pose.header.frame_id!="map")mapped=tf_->transform(pose,"map",tf2::durationFromSec(0.03));}
   catch(const tf2::TransformException&){return fail("Map transform unavailable");}
-  double yaw=tf2::getYaw(mapped.pose.orientation);
-  U position(mapped.pose.position.x,mapped.pose.position.y);
-  if(!position.allFinite()||!std::isfinite(yaw))return fail("Invalid lidar pose");
-  // Feedback can arrive faster than LIO publishes TF. Advance the latest lidar
-  // heading with its measured angular rate to the feedback's sample timestamp,
-  // rather than blocking for a future TF or substituting chassis spin.
-  double pose_stamp=stamp_seconds(mapped.header.stamp),pose_age=now.seconds()-pose_stamp;
-  if(pose_age<-.05||pose_age>pose_timeout_)return fail("Map pose stale");
-  double feedback_yaw=yaw+radar_omega_*(stamp_seconds(feedback_->header.stamp)-pose_stamp);
-  U measured=rotation(feedback_yaw)*U(feedback_->vx_mps,feedback_->vy_mps);
-  position+=measured*std::max(0.0,pose_age);yaw+=radar_omega_*std::max(0.0,pose_age);
+  MotionProjection projection;
+  try{const auto& p=mapped.pose.position;const auto& q=mapped.pose.orientation;
+    projection=project_motion(*motion_.sample(),Eigen::Vector3d(p.x,p.y,p.z),Eigen::Quaterniond(q.w,q.x,q.y,q.z),stamp_seconds(mapped.header.stamp),now.seconds());
+  }catch(const std::exception&){return fail("FAST-LIO and map pose projection invalid");}
+  double yaw=projection.yaw;U position=projection.position,measured=projection.velocity;radar_omega_=projection.omega;
   double elapsed=last_output_.nanoseconds()==0?DT:(now-last_output_).seconds();
   if(last_output_.nanoseconds()!=0&&(elapsed<0.025||elapsed>0.10))return fail("Control timing discontinuity");
   U previous=rotation(yaw)*previous_command_;
@@ -232,7 +224,7 @@ geometry_msgs::msg::TwistStamped Controller::computeVelocityCommands(const geome
   nav_msgs::msg::Path prediction;prediction.header.frame_id="map";prediction.header.stamp=now;
   for(int k=0;k<=N;++k){geometry_msgs::msg::PoseStamped p;p.header=prediction.header;p.header.stamp=now+rclcpp::Duration::from_seconds(k*DT);p.pose.position.x=solution.states[k][0];p.pose.position.y=solution.states[k][1];p.pose.orientation.w=1;prediction.poses.push_back(p);}
   prediction_pub_->publish(prediction);
-  std_msgs::msg::String status;std::ostringstream text;text<<"{\"ready\":true,\"state\":\""<<motion_name(recovery_->state())<<"\",\"cost\":"<<solution.cost<<",\"measured_vx\":"<<feedback_->vx_mps<<",\"measured_vy\":"<<feedback_->vy_mps<<",\"chassis_omega\":"<<feedback_->chassis_omega_radps<<"}";status.data=text.str();status_pub_->publish(status);
+  std_msgs::msg::String status;std::ostringstream text;text<<"{\"ready\":true,\"velocity_source\":\"fast_lio\",\"state\":\""<<motion_name(recovery_->state())<<"\",\"cost\":"<<solution.cost<<",\"lio_vx\":"<<motion_.sample()->velocity.x()<<",\"lio_vy\":"<<motion_.sample()->velocity.y()<<",\"lidar_omega\":"<<radar_omega_<<"}";status.data=text.str();status_pub_->publish(status);
   return output;
 }
 }

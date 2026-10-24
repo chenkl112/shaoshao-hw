@@ -60,3 +60,7 @@ python3 -m unittest discover -s web_panel -p 'test*.py' -q
 ## UART1 V2 验收
 
 `navcar_v2_integration.py` 使用独立 ROS Domain 73、C++ 8081 服务和 PTY MCU，检查 SI/旋转符号、底盘系反馈、重复命令序号、两路独立超时、NaN/惯导独立有效性，以及不会自动伪造 ChassisFeedback。`ros_integration.py` 的 MCU 同步更新为 V2，导航必需的同步时间、雷达系速度和硬件授权仍由显式合成传感器提供。新协议不包含这些字段，真实上车边界见 [V2 接入说明](../deployment/NavcarV2接入.md)。
+
+## FAST-LIO 运动源
+
+生产运动输入已切为 FAST-LIO，硬件授权为独立 ControlAuthority。`hw_omni_controller/test/test_motion.cpp` 检查参考点/协方差/时间对齐与无效输入，`ros_integration.py` 同时注入错误轮速、旧 ChassisFeedback 和 LIO 协方差故障，验证不回退轮速、停车、重新规划与原目标到达。记录见 [2026-10-24-lio-motion.json](2026-10-24-lio-motion.json)。

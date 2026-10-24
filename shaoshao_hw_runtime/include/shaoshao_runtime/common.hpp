@@ -69,7 +69,7 @@ struct IndexSettings {double distance=.25,angle=pi/18,radius=15;int rings=20,sec
 struct Config {
   YAML::Node yaml;RegistrationSettings registration;IndexSettings index;
   double speed=.5,resolution=.025,radius=.297658,lidar_height=.327,acceleration=.3,deceleration=.3,jerk=1;
-  double tau_x=.3,tau_y=.3,feedback_timeout=.15,prediction_timeout=.3,obstacle_margin=.15;
+  double tau_x=.3,tau_y=.3,feedback_timeout=.15,prediction_timeout=.3,obstacle_margin=.15,lio_timeout=.15,lio_velocity_std=.5;
   Point lidar_offset=Point(-.011,-.02329,.04412),center_offset=Point(.00318,-.02329,0);
   explicit Config(const fs::path& path):yaml(YAML::LoadFile(path.string())){
     if(!yaml.IsMap())throw std::invalid_argument("robot.yaml must be a mapping");auto nav=yaml["navigation"];
@@ -79,13 +79,13 @@ struct Config {
     auto motion=nav["motion"];acceleration=number(motion,"acceleration_mps2",.3);deceleration=number(motion,"deceleration_mps2",.3);jerk=number(motion,"jerk_mps3",1.);
     if(motion["frequency_hz"]&&motion["frequency_hz"].as<double>()!=50)throw std::invalid_argument("Output frequency must remain 50 Hz");
     if(motion["command_timeout_s"]&&number(motion,"command_timeout_s",.2)>.2)throw std::invalid_argument("Invalid command watchdog");
-    auto m=nav["mpc"];tau_x=number(m,"tau_x_s",.3);tau_y=number(m,"tau_y_s",.3);feedback_timeout=number(m,"feedback_timeout_s",.15);prediction_timeout=number(m,"prediction_timeout_s",.3);obstacle_margin=number(m,"obstacle_margin_m",.15);
+    auto m=nav["mpc"];tau_x=number(m,"tau_x_s",.3);tau_y=number(m,"tau_y_s",.3);feedback_timeout=number(m,"authority_timeout_s",number(m,"feedback_timeout_s",.15));lio_timeout=number(m,"lio_timeout_s",.15);lio_velocity_std=number(m,"lio_velocity_std_limit_mps",.5);prediction_timeout=number(m,"prediction_timeout_s",.3);obstacle_margin=number(m,"obstacle_margin_m",.15);
     auto r=nav["registration"];auto& p=registration;
     p.period=number(r,"period_s",1);p.voxel=number(r,"voxel_m",.05);p.max_error=number(r,"max_error",.3);p.min_overlap=number(r,"min_overlap",.8);p.min_eigenvalue=number(r,"min_eigenvalue",1000);p.max_condition=number(r,"max_condition",1e6);
     p.max_step=number(r,"max_step_m",.2);p.max_angle=number(r,"max_step_rad",.1);p.alpha=number(r,"alpha",.4);
     if(r["confirmations"])p.confirmations=r["confirmations"].as<int>();p.fresh=number(r,"fresh_s",1.6);p.timeout=number(r,"timeout_s",2);p.hold_distance=number(r,"hold_distance_m",.05);p.degraded_speed=number(r,"degraded_speed_mps",.05);p.search_timeout=number(r,"search_timeout_s",30);p.retry=number(r,"retry_s",5);p.scan_timeout=number(r,"scan_timeout_s",.5);
     auto i=nav["index"];index.distance=number(i,"distance_m",.25);index.angle=number(i,"angle_rad",pi/18);index.radius=number(i,"radius_m",15);if(i["rings"])index.rings=i["rings"].as<int>();if(i["sectors"])index.sectors=i["sectors"].as<int>();
-    if(speed<.01||speed>.5||resolution<.01||resolution>.1||tau_x<.02||tau_x>3||tau_y<.02||tau_y>3||feedback_timeout>.2||prediction_timeout>.5||p.alpha>1||p.min_overlap>1||p.confirmations<2||p.confirmations>10||p.fresh>=p.timeout||p.timeout>5||p.hold_distance>.2||p.degraded_speed>.1||index.rings<1||index.rings>100||index.sectors<6||index.sectors>360)throw std::invalid_argument("Configuration safety/resource bounds exceeded");
+    if(speed<.01||speed>.5||resolution<.01||resolution>.1||tau_x<.02||tau_x>3||tau_y<.02||tau_y>3||feedback_timeout>.2||lio_timeout>.15||lio_velocity_std>2||prediction_timeout>.5||p.alpha>1||p.min_overlap>1||p.confirmations<2||p.confirmations>10||p.fresh>=p.timeout||p.timeout>5||p.hold_distance>.2||p.degraded_speed>.1||index.rings<1||index.rings>100||index.sectors<6||index.sectors>360)throw std::invalid_argument("Configuration safety/resource bounds exceeded");
     auto reference=nav["reference_point"]?nav["reference_point"].as<std::string>():"yaw_axis";if(reference!="yaw_axis")throw std::invalid_argument("Native runtime requires the measured yaw_axis reference");
     auto offset=yaml["yaw"]["lidar_offset_xy_m"];if(!offset.IsSequence()||offset.size()!=2)throw std::invalid_argument("Measured lidar XY offset required");
     Eigen::Vector2d xy(offset[0].as<double>(),offset[1].as<double>());double length=yaml["yaw"]["lidar_offset_radius_m"].as<double>();

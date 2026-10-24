@@ -85,37 +85,35 @@ void feedback(){
   gate.update(sample(1.16,0,3,true),1.16);require(gate.ready(1.16),"New authority epoch allows sequence restart");
   gate.update(sample(1.17,99,1),1.17);require(gate.sample()->authority_epoch==3,"Old authority cannot regain control");
 }
+hw_omni::AuthoritySample authority(double stamp=1,uint64_t seq=1,uint64_t epoch=1,bool allowed=true){return {stamp,seq,epoch,allowed,"navcar_center"};}
+hw_omni::MotionSample motion(double stamp=1,double vx=.08){hw_omni::MotionSample m;m.stamp=stamp;m.velocity.x()=vx;return m;}
 hw_omni::CommandRelay relay(){
   using namespace hw_omni;CommandRelay r;
-  r.update_feedback(sample(),1);r.update_session({1,"lease-A",1,true},1);
+  r.update_authority(authority(),1);r.update_motion(motion(),1);r.update_session({1,"lease-A",1,true},1);
   r.raw=U(.08,.03);r.raw_stamp=1;r.pose_stamp=1;r.localization_stamp=1;r.localized=true;r.localization_speed=.5;
   r.prediction_valid=true;r.prediction_stamp=1;r.grid_stamp=1;r.grid.width=200;r.grid.height=200;
   r.grid.resolution=.025;r.grid.origin=U(-2.5,-2.5);r.grid.cells.assign(40000,0);return r;
 }
 void relay_gates(){
   using namespace hw_omni;
-  auto r=relay();auto output=r.step(1.02);require(output.moving&&(output.velocity-U(.08,.03)).norm()<1e-12,"C++ relay sends XY independently of chassis spin");
-  require(!r.step(1.16).moving,"Stale actual feedback stops relay");
-  r=relay();r.update_feedback(sample(1.03,0,2,false),1.03);require(!r.step(1.03).moving,"Hardware takeover stops relay immediately");
-  r.update_feedback(sample(1.04,0,3,true),1.04);require(!r.step(1.04).moving,"Re-enable cannot reuse old-epoch lease");
+  auto r=relay();auto output=r.step(1.02);require(output.moving&&(output.velocity-U(.08,.03)).norm()<1e-12,"Relay uses FAST-LIO motion and independent authority");
+  r.update_authority(authority(1.1,2),1.1);require(!r.step(1.16).moving&&r.step(1.16).reason.find("FAST-LIO")!=std::string::npos,"Fresh authority cannot hide stale LIO velocity");
+  r=relay();r.update_authority(authority(1.03,0,2,false),1.03);require(!r.step(1.03).moving,"Hardware takeover stops relay immediately");
+  r.update_authority(authority(1.04,0,3,true),1.04);require(!r.step(1.04).moving,"Re-enable cannot reuse old-epoch lease");
   r.update_session({1.04,"lease-B",3,true},1.04);require(!r.step(1.04).moving,"New session cannot reuse a previous MPC command");
   r.raw_stamp=1.04;require(r.step(1.04).moving,"Fresh session and command can resume explicitly");
   r=relay();r.prediction_valid=false;require(!r.step(1.02).moving,"Missing predictions block output");
-  r=relay();auto bad=sample(1.01,2);bad.vx=std::numeric_limits<double>::quiet_NaN();r.update_feedback(bad,1.01);
-  r.update_feedback(sample(1.02,3),1.02);require(!r.step(1.02).moving,"Recovery from invalid feedback requires a new MPC command");
+  r=relay();auto bad=motion(1.01);bad.velocity.x()=std::numeric_limits<double>::quiet_NaN();r.update_motion(bad,1.01);
+  r.update_motion(motion(1.02),1.02);require(!r.step(1.02).moving,"LIO recovery requires a new MPC command");
   r=relay();r.update_session({1.01,"lease-A",1,false},1.01);require(!r.step(1.02).moving,"Task cancellation emits zero");
-  r=relay();r.raw=U(.01,0);auto fast=sample();fast.vx=.3;r.update_feedback(sample(1.01,2),1.01);
-  fast.sequence=3;fast.stamp=1.02;r.update_feedback(fast,1.02);
-  r.grid.cells[100*200+108]=253;require(!r.step(1.02).moving,"Braking guard uses measured speed, not only a small target");
-  r.yaw=hw_obstacles::PI/2;r.feedback_yaw=0;
-  require(!r.step(1.02).moving,"Measured velocity uses its sample-time heading rather than the current lidar heading");
+  r=relay();r.raw=U(.01,0);r.update_motion(motion(1.02,.3),1.02);
+  r.grid.cells[100*200+108]=253;require(!r.step(1.02).moving,"Braking guard uses LIO speed, not only a small target");
   r=relay();Obstacle obstacle;obstacle.footprint={U(-.1,-.1),U(.1,-.1),U(.1,.1),U(-.1,.1)};
   for(int i=0;i<=30;++i)obstacle.centers.emplace_back(.05,.5-i*.1);
   r.obstacles={obstacle};require(!r.step(1.02).moving,"Relay checks future obstacle position in braking corridor");
-  r=relay();r.grid.cells[110*200+100]=255;
-  require(!r.step(1.02).moving,"Relay rejects unknown cells under the body even when its center is clear");
+  r=relay();r.grid.cells[110*200+100]=255;require(!r.step(1.02).moving,"Relay checks unknown cells under the full body");
   r=relay();require(r.step(1.25).lease=="lease-A","Stale task heartbeat first sends a bounded zero");
-  require(r.step(1.5).lease.empty(),"An orphan task must stop renewing the UART lease with zeros");
+  require(r.step(1.5).lease.empty(),"An orphan task stops renewing UART lease with zeros");
 }
 int main(){
   try{detector_and_shapes();tracking();clouds();feedback();relay_gates();std::cout<<"All native obstacle, feedback and command-relay tests passed\n";}

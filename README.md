@@ -1,6 +1,6 @@
 # 哨哨 HW
 
-面向四轮全向底盘和顶置 MID360 的独立导航工程。保留 FAST-LIO + small_gicp、网页选点和 Nav2 任务接口；全局规划使用 HW 空间 A*、走廊 Kino A*、MINCO 和速度剖面，局部控制使用 HW FDDP 求解器与整车 XY 速度响应模型；动态障碍检测/跟踪/预测、底盘反馈门控和 50 Hz 速度转发使用 C++。UART1 已同步 [Navcar V2](deployment/NavcarV2接入.md)：SI 目标与底盘系轮速反馈。实现边界与电控接口见 [HW 全向导航方案](deployment/HW全向导航方案.md)。
+面向四轮全向底盘和顶置 MID360 的独立导航工程。保留 FAST-LIO + small_gicp、网页选点和 Nav2 任务接口；全局规划使用 HW 空间 A*、走廊 Kino A*、MINCO 和速度剖面，局部控制使用 HW FDDP 求解器与整车 XY 速度响应模型；动态障碍检测/跟踪/预测、底盘授权门控和 50 Hz 速度转发使用 C++。UART1 已同步 [Navcar V2](deployment/NavcarV2接入.md)：SI 目标与底盘系轮速反馈。实现边界与电控接口见 [HW 全向导航方案](deployment/HW全向导航方案.md)。
 
 从 [shaoshao](https://github.com/chenkl112/shaoshao) 的 `debd22c1089ef2421fdb5667d0f08007d4aa9e7c` 独立建立，参考 [HWSentryNav26](https://github.com/Polyacetone/HWSentryNav26) 的配准质量评估思路。原仓库保持独立。上车步骤见 [部署说明](deployment/README.md)，串口格式见 [Navcar V2 接入](deployment/NavcarV2接入.md)。
 
@@ -15,7 +15,7 @@
 - HW FDDP 20 Hz 预测未来 2 s 的全向运动，目标合速度上限 **0.5 m/s**、加速度 **0.3 m/s²**、jerk **1 m/s³**；50 Hz 转发目标。平移与小陀螺分通道，四轮分配由电控完成。
 - 规划失败保留目标，0.5 s 冷却后重试；跟随 6 s 无进展或检测物理卡住时进入反向退让/安全点恢复，结束后重新规划原目标。见 [规划与脱困适配](validation/hw-planning-recovery.md)。
 - 点云与静态地图差分，聚类、匈牙利关联和卡尔曼跟踪，发布带形状的 3 s 障碍预测；MPC 按采样时间对齐并验收未来碰撞。
-- UART1 V2 直接发送 SI 目标并回传底盘系轮速推算值；原始反馈发布到 `/hw/navcar/feedback`。协议仍缺硬件控制权、采样时间和云台相对底盘角，因此不直接生成导航所需的 `/hw/chassis_feedback`，这些条件未补齐时导航保持停车。
+- 预测、规划初速度、刹停和到位判断统一使用 FAST-LIO 雷达/IMU 融合速度，保留采样时间并补偿到车体中心，不回退到轮速。拨杆授权独立使用 `/hw/control_authority`；V2 原始轮速只供诊断。见 [FAST-LIO 速度预测](deployment/FASTLIO速度预测.md)。
 
 ## 网页
 

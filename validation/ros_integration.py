@@ -26,7 +26,7 @@ class NativeMCU:
         self.master,self.slave=pty.openpty();tty.setraw(self.slave);os.set_blocking(self.master,False)
         self.port=os.ttyname(self.slave);self.closed=threading.Event();self.lock=threading.Lock()
         self.velocity=np.zeros(2);self.position=np.zeros(2);self.target=np.zeros(2);self.commands=[]
-        self.blocked=False;self.invalid_wheels=False;self.command_at=0.;self.seq=65535;self.accepted_payload=None;self.thread=threading.Thread(target=self.run,daemon=True);self.thread.start()
+        self.blocked=False;self.invalid_wheels=False;self.wheel_override=None;self.command_at=0.;self.seq=65535;self.accepted_payload=None;self.thread=threading.Thread(target=self.run,daemon=True);self.thread.start()
     def run(self):
         buffer=bytearray();previous=time.monotonic();last_state=0.
         while not self.closed.wait(.002):
@@ -68,7 +68,7 @@ class NativeMCU:
                 c,s=math.cos(.4),math.sin(.4)
                 # State is wheel-derived BODY velocity, not command echo or lidar velocity.
                 forward=c*measured[0]-s*measured[1];left=s*measured[0]+c*measured[1]
-                values=(math.nan,math.nan,math.nan,17) if self.invalid_wheels else (forward,-left,0,17)
+                values=(math.nan,math.nan,math.nan,17) if self.invalid_wheels else (*(self.wheel_override or (forward,-left,0)),17)
                 os.write(self.master,frame(STATE,self.seq,struct.pack('<4f',*values)));last_state=now
     def close(self):
         self.closed.set();self.thread.join(1);os.close(self.master);os.close(self.slave)
@@ -95,7 +95,7 @@ def main():
     from sensor_msgs.msg import PointCloud2
     from geometry_msgs.msg import TransformStamped
     from tf2_ros import TransformBroadcaster
-    from shaoshao_hw_interfaces.msg import ChassisFeedback,NavcarFeedback
+    from shaoshao_hw_interfaces.msg import ChassisFeedback,NavcarFeedback,ControlAuthority
     import yaml
     from ament_index_python.packages import get_package_prefix
     def native(name):return Path(get_package_prefix('shaoshao_hw_runtime'))/'lib/shaoshao_hw_runtime'/name
@@ -130,9 +130,10 @@ def main():
             self.cloud=self.create_publisher(PointCloud2,'/cloud_registered',qos_profile_sensor_data)
             self.body=self.create_publisher(PointCloud2,'/cloud_registered_body',qos_profile_sensor_data)
             self.odom=self.create_publisher(Odometry,'/navcar/state_estimation',10)
-            self.feedback=self.create_publisher(ChassisFeedback,'/hw/chassis_feedback',10)
+            self.authority=self.create_publisher(ControlAuthority,'/hw/control_authority',10)
+            self.legacy_feedback=self.create_publisher(ChassisFeedback,'/hw/chassis_feedback',10)
             self.feedback_seq=0;self.authority_epoch=1;self.control_allowed=True
-            self.tf=TransformBroadcaster(self);self.enabled=True;self.prediction_fault=False
+            self.tf=TransformBroadcaster(self);self.enabled=True;self.prediction_fault=False;self.lio_fault=False
             self.last_grid=None;self.raw_commands=[];self.controller_states=[];self.wire_feedback=[]
             self.create_subscription(NavcarFeedback,'/hw/navcar/feedback',self.wire_feedback.append,10)
             self.create_subscription(String,'/hw/mpc/status',self.controller_status,10)
@@ -147,11 +148,14 @@ def main():
             except (ValueError,TypeError):pass
         def grid(self,msg):self.last_grid=msg
         def actual_feedback(self):
-            with mcu.lock:velocity=mcu.velocity.copy()
-            msg=ChassisFeedback();msg.header.frame_id='navcar_center';msg.header.stamp=self.get_clock().now().to_msg()
-            self.feedback_seq+=1;msg.seq=self.feedback_seq;msg.authority_epoch=self.authority_epoch
-            msg.control_allowed=self.control_allowed;msg.vx_mps=float(velocity[0]);msg.vy_mps=float(velocity[1])
-            self.feedback.publish(msg)
+            msg=ControlAuthority();msg.header.frame_id='navcar_center';msg.header.stamp=self.get_clock().now().to_msg()
+            self.feedback_seq+=1;msg.seq=self.feedback_seq;msg.authority_epoch=self.authority_epoch;msg.control_allowed=self.control_allowed
+            self.authority.publish(msg)
+            # Contradictory legacy velocity/angle/authority must be ignored by
+            # every production motion consumer; only ControlAuthority is used.
+            old=ChassisFeedback();old.header=msg.header;old.seq=msg.seq;old.authority_epoch=999;old.control_allowed=False
+            old.vx_mps=math.nan;old.vy_mps=999.;old.chassis_omega_radps=20;old.gimbal_relative_yaw_rad=1000.
+            self.legacy_feedback.publish(old)
         def tick(self):
             if not self.enabled:return
             with mcu.lock:xy=mcu.position.copy();velocity=mcu.velocity.copy()
@@ -164,6 +168,8 @@ def main():
             msg=Odometry();msg.header.frame_id='navcar_odom';msg.header.stamp=now;msg.child_frame_id='navcar_imu'
             msg.pose.pose.position.x=float(xy[0]);msg.pose.pose.position.y=float(xy[1]);msg.pose.pose.orientation.w=1.
             msg.twist.twist.linear.x=float(velocity[0]);msg.twist.twist.linear.y=float(velocity[1])
+            for axis in range(6):msg.twist.covariance[axis*6+axis]=.001
+            if self.lio_fault:msg.twist.covariance[0]=1.
             self.odom.publish(msg)
             tf=TransformStamped();tf.header=msg.header;tf.child_frame_id='navcar_imu'
             tf.transform.translation.x=float(xy[0]);tf.transform.translation.y=float(xy[1]);tf.transform.rotation.w=1.
@@ -212,6 +218,7 @@ def main():
         info=api(8080,'/api/map');target={'x':float(expected[0]+.9),'y':float(expected[1]+.35),'map_revision':info['revision']}
         api(8080,'/api/navigation/plan',target)
         wait_for(lambda:api(8080,'/api/state')['navigation']['plan']['status']=='ready',10,'Path preview')
+        mcu.wheel_override=(2.,-2.,4.)  # unrelated wheel values must not enter MPC/odom
         api(8080,'/api/navigation/goal',target)
         wait_for(lambda:any(math.hypot(x,y)>.02 for _,x,y,*_ in mcu.commands),20,'FDDP -> leased ROS -> synthetic native UART motion')
         # Force real MPC/relay rejection for longer than controller patience,
@@ -230,10 +237,23 @@ def main():
         assert original_arrival_error<.06,original_arrival_error
         time.sleep(.3)
         assert math.hypot(mcu.commands[-1][1],mcu.commands[-1][2])<1e-5
+        # Keep authority, wheel reports, cloud and odometry arriving, but make
+        # the LIO velocity covariance invalid. No wheel fallback is permitted.
+        current=api(8080,'/api/state')['navigation']['pose']
+        lio_goal={'x':current['x']+.3,'y':current['y'],'map_revision':api(8080,'/api/map')['revision']}
+        api(8080,'/api/navigation/goal',lio_goal)
+        wait_for(lambda:api(8080,'/api/state')['navigation']['status']=='active',10,'LIO covariance test mission')
+        sensors.lio_fault=True
+        wait_for(lambda:(n:=api(8080,'/api/state')['navigation'])['goal_pending'] and not n['velocity_ready'],3,'Invalid LIO covariance pauses original destination')
+        wait_for(lambda:math.hypot(mcu.commands[-1][1],mcu.commands[-1][2])<1e-5,3,'LIO uncertainty emits zero UART target')
+        sensors.lio_fault=False
+        wait_for(lambda:api(8080,'/api/state')['navigation']['status']=='succeeded',40,'Fresh LIO recovers and reaches same destination')
+        assert api(8080,'/api/state')['navigation']['velocity_source']=='fast_lio'
+        assert any(v.get('velocity_source')=='fast_lio' for _,v in sensors.controller_states)
         # Physically block the synthetic drivetrain while actual feedback remains
         # healthy. The real C++ controller must reverse, then replan the same goal.
         current=api(8080,'/api/state')['navigation']['pose']
-        stuck_goal={'x':current['x']+.65,'y':current['y']+.1,'map_revision':api(8080,'/api/map')['revision']}
+        stuck_goal={'x':current['x']+.4,'y':current['y']+.1,'map_revision':api(8080,'/api/map')['revision']}
         with mcu.lock:mcu.blocked=True;stuck_position=mcu.position.copy()
         stuck_started=time.monotonic();api(8080,'/api/navigation/goal',stuck_goal)
         wait_for(lambda:any(t>stuck_started and v.get('state')=='stuck_reverse' for t,v in sensors.controller_states),18,'HW no-progress/stuck state enters reverse')
@@ -312,7 +332,7 @@ def main():
         assert api(8081,'/api/state')['navigation_max_speed_mps']==.15,'UART used stale safety limit'
         result={'original_blocked_goal_arrival_error_m':original_arrival_error,'controller_failure_retry_count':paused['retry_count'],'global_pose_error_m':float(np.linalg.norm([recovered['x']-expected[0],recovered['y']-expected[1]])),
                 'native_commands':len(mcu.commands),'max_command_speed_mps':max(math.hypot(c[1],c[2]) for c in mcu.commands),
-                'recovery_states':sorted({v.get('state','') for _,v in sensors.controller_states if v.get('state')}),'checks':['UART1 V2 SI commands and body-frame measured feedback','V2 100 Hz repeated command sequence accepted','HW global planning plugin and MINCO profile','HW physical blockage triggers reverse and original-goal arrival','automatic unknown-pose GICP','FDDP activation','time-indexed predictions','synthetic measured feedback','Web preview/goal','native CRC/ACK transport',
+                'recovery_states':sorted({v.get('state','') for _,v in sensors.controller_states if v.get('state')}),'checks':['FAST-LIO is the only velocity source','Contradictory wheel/legacy ChassisFeedback ignored','Invalid LIO covariance pauses and restores original goal','Independent ControlAuthority takeover','UART1 V2 SI commands and body-frame measured feedback','V2 100 Hz repeated command sequence accepted','HW global planning plugin and MINCO profile','HW physical blockage triggers reverse and original-goal arrival','automatic unknown-pose GICP','FDDP activation','time-indexed predictions','synthetic FAST-LIO state and independent hardware authority','Web preview/goal','native CRC/ACK transport',
                           'localization loss stops','automatic replan/resume','explicit retry RPC and resume','manual takeover revokes lease','new explicit goal reaches target and stops','65-page stop capacity','orphan lease expires and reacquires','mode switch reloads MPC and UART limits','controller failure retains target beyond patience','original blocked destination reached and stopped','replan and continue to destination after recovery','cancel while waiting prevents restart']}
         (runtime/'integration-result.json').write_text(json.dumps(result,indent=2))
         print(json.dumps(result),flush=True)

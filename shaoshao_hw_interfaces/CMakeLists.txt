@@ -8,7 +8,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME} "msg/NavCommand.msg" "msg/ChassisFeedback.msg"
   "msg/SpinCommand.msg" "msg/PredictedObstacle.msg" "msg/PredictedObstacles.msg" "srv/RegisterCloud.srv"
-  "msg/LocalizationStatus.msg" "msg/NavigationSession.msg" "msg/PlannedTrajectory.msg" "msg/NavcarFeedback.msg"
+  "msg/LocalizationStatus.msg" "msg/NavigationSession.msg" "msg/PlannedTrajectory.msg" "msg/NavcarFeedback.msg" "msg/ControlAuthority.msg"
   DEPENDENCIES std_msgs geometry_msgs sensor_msgs nav_msgs)
 ament_export_dependencies(rosidl_default_runtime)
 ament_package()

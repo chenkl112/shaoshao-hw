@@ -128,7 +128,7 @@ struct Grid {
   }
 };
 
-// State: map x/y, measured map vx/vy, previous target vx/vy,
+// State: map x/y, FAST-LIO estimated map vx/vy, previous target vx/vy,
 // previous target increment. Control: next target map vx/vy.
 // Lidar heading is an exogenous input. Chassis spin is NEVER used as lidar yaw rate.
 class Problem {

@@ -1,10 +1,10 @@
 #pragma once
 #include <nav2_core/global_planner.hpp>
 #include <nav2_costmap_2d/costmap_2d_ros.hpp>
-#include <shaoshao_hw_interfaces/msg/chassis_feedback.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 #include "planner_defaults.hpp"
 #include "trajectory_bridge.hpp"
-#include "feedback.hpp"
+#include "motion.hpp"
 #include <mutex>
 namespace hw_omni {
 class Planner : public nav2_core::GlobalPlanner {
@@ -22,9 +22,9 @@ private:
   std::unique_ptr<nav_executor::PathPlanner> planner_;
   nav_executor::PlannerConfig config_{};
   rclcpp_lifecycle::LifecyclePublisher<TrajectoryMessage>::SharedPtr publisher_;
-  rclcpp::Subscription<shaoshao_hw_interfaces::msg::ChassisFeedback>::SharedPtr feedback_sub_;
-  std::mutex feedback_mutex_;
-  FeedbackGate feedback_gate_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+  std::mutex motion_mutex_;
+  MotionGate motion_;
   double radius_=.317658;
   uint64_t generation_=0;
 };

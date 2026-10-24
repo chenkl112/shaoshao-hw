@@ -28,7 +28,9 @@ navigation:
   mpc:
     tau_x_s: 0.30
     tau_y_s: 0.30
-    feedback_timeout_s: 0.15
+    authority_timeout_s: 0.15
+    lio_timeout_s: 0.15
+    lio_velocity_std_limit_mps: 0.50
     prediction_timeout_s: 0.30
     obstacle_margin_m: 0.15
 network:

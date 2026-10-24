@@ -78,7 +78,7 @@ void tasks(const fs::path& root){
   Tasks t(maps);t.hooks.mode=[](auto){throw std::runtime_error("start failed");};
   rejects([&]{t.request_mode("navigation");},"Propagate process startup failure");
   require(!t.switching&&t.mode=="idle","Startup failure must not lock mode switching");
-  t.mode="navigation";t.localized=t.hardware_ready=t.nav_server=t.stack_ready=t.serial_ready=true;
+  t.mode="navigation";t.localized=t.lio_ready=t.hardware_ready=t.nav_server=t.stack_ready=t.serial_ready=true;
   t.cloud_at=t.odom_at=t.pose_at=t.serial_at=10;t.pose["yaw"]=0;
   Json::Value goal;goal["x"]=1.;goal["y"]=1.;goal["map_revision"]=map.info["revision"];
   t.hooks.plan=[](auto,const auto&){throw std::runtime_error("planner unavailable");};
@@ -110,7 +110,7 @@ void serial_recovery(){
 }
 void automatic_retry(const fs::path& root){
   auto maps=root/"retry-map";save_grid(maps,100,100,.025,Point::Zero(),std::vector<int8_t>(10000,0));
-  Tasks t(maps);t.mode="navigation";t.localized=t.hardware_ready=t.nav_server=t.stack_ready=t.serial_ready=true;t.pose["yaw"]=0;t.localization["state"]="tracking";
+  Tasks t(maps);t.mode="navigation";t.localized=t.lio_ready=t.hardware_ready=t.nav_server=t.stack_ready=t.serial_ready=true;t.pose["yaw"]=0;t.localization["state"]="tracking";
   auto fresh=[&](double at){t.cloud_at=t.odom_at=t.pose_at=t.serial_at=at;};fresh(10);
   Json::Value goal;goal["x"]=1.;goal["y"]=1.;goal["map_revision"]=saved_map(maps).info["revision"];t.resume=goal;t.goal=goal;t.goal_pending=true;t.nav_status="waiting";
   int attempts=0;t.hooks.plan=[&](auto,const auto&){++attempts;throw std::runtime_error("planner unavailable");};
@@ -131,7 +131,7 @@ void automatic_retry(const fs::path& root){
 
 void persistent_destination(const fs::path& root){
   auto maps=root/"persistent-map";save_grid(maps,100,100,.025,Point::Zero(),std::vector<int8_t>(10000,0));
-  Tasks t(maps);t.mode="navigation";t.localized=t.hardware_ready=t.nav_server=t.stack_ready=t.serial_ready=true;
+  Tasks t(maps);t.mode="navigation";t.localized=t.lio_ready=t.hardware_ready=t.nav_server=t.stack_ready=t.serial_ready=true;
   t.pose["yaw"]=0;t.localization["state"]="tracking";t.hardware(true,1);
   auto fresh=[&](double at){t.cloud_at=t.odom_at=t.pose_at=t.serial_at=at;};fresh(10);
   Json::Value goal;goal["x"]=1.;goal["y"]=1.;goal["map_revision"]=saved_map(maps).info["revision"];

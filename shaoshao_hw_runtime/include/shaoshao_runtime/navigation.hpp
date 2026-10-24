@@ -2,7 +2,7 @@
 #include "tasks.hpp"
 #include "ros.hpp"
 #include "http.hpp"
-#include <hw_omni_controller/feedback.hpp>
+#include <hw_omni_controller/ros_samples.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <nav2_msgs/action/navigate_to_pose.hpp>
 #include <nav2_msgs/action/compute_path_to_pose.hpp>
@@ -11,7 +11,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/path.hpp>
-#include <shaoshao_hw_interfaces/msg/chassis_feedback.hpp>
+#include <shaoshao_hw_interfaces/msg/control_authority.hpp>
 #include <shaoshao_hw_interfaces/msg/navigation_session.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <tf2_ros/buffer.h>
@@ -27,7 +27,7 @@ class Navigation {
 public:
   Navigation(rclcpp::Node::SharedPtr node,Tasks& tasks,fs::path root)
       :node_(std::move(node)),tasks_(tasks),root_(std::move(root)),
-       config_(robot_configuration(root_)),gate_(config_.feedback_timeout),
+       config_(robot_configuration(root_)),gate_(config_.feedback_timeout),motion_gate_(config_.lio_timeout,config_.lio_velocity_std),
        buffer_(node_->get_clock()),listener_(buffer_){
     navigator_=rclcpp_action::create_client<Navigate>(node_,"/navigate_to_pose");
     planner_=rclcpp_action::create_client<Plan>(node_,"/compute_path_to_pose");
@@ -49,12 +49,9 @@ public:
         quality_at_=steady();tasks_.localization_state(value);
       }catch(const std::exception&){}
     });
-    feedback_=node_->create_subscription<shaoshao_hw_interfaces::msg::ChassisFeedback>("/hw/chassis_feedback",10,[this](shaoshao_hw_interfaces::msg::ChassisFeedback::SharedPtr msg){
-      hw_omni::ChassisSample sample;sample.stamp=seconds(msg->header.stamp);sample.sequence=msg->seq;sample.authority_epoch=msg->authority_epoch;
-      sample.control_allowed=msg->control_allowed;sample.vx=msg->vx_mps;sample.vy=msg->vy_mps;sample.omega=msg->chassis_omega_radps;sample.gimbal_yaw=msg->gimbal_relative_yaw_rad;sample.frame=msg->header.frame_id;
-      std::lock_guard<std::recursive_mutex> lock(tasks_.mutex);gate_.update(sample,node_->now().seconds());
-      tasks_.hardware(gate_.ready(node_->now().seconds()),gate_.sample()?gate_.sample()->authority_epoch:0,
-                      gate_.sample()&&!gate_.sample()->control_allowed);
+    authority_=node_->create_subscription<shaoshao_hw_interfaces::msg::ControlAuthority>("/hw/control_authority",10,[this](shaoshao_hw_interfaces::msg::ControlAuthority::SharedPtr msg){
+      std::lock_guard<std::recursive_mutex> lock(tasks_.mutex);gate_.update(hw_omni::authority_sample(*msg),node_->now().seconds());
+      tasks_.hardware(gate_.ready(node_->now().seconds()),gate_.sample()?gate_.sample()->authority_epoch:0,gate_.sample()&&!gate_.sample()->control_allowed);
     });
     odometry_=node_->create_subscription<nav_msgs::msg::Odometry>("/navcar/state_estimation",10,[this](nav_msgs::msg::Odometry::SharedPtr msg){odom(*msg,true);});
     mapping_odom_=node_->create_subscription<nav_msgs::msg::Odometry>("/state_estimation",10,[this](nav_msgs::msg::Odometry::SharedPtr msg){odom(*msg,false);});
@@ -96,9 +93,9 @@ public:
   }
   ~Navigation(){release();}
   // Called with Tasks locked, after a mode transition completed.
-  void reset(){++mode_epoch_;startup_=false;quality_at_=0;goal_handle_.reset();tasks_.costmap["available"]=false;tasks_.motion=Json::Value();release();Config next(robot_configuration(root_));config_=std::move(next);gate_=hw_omni::FeedbackGate(config_.feedback_timeout);}
+  void reset(){++mode_epoch_;startup_=false;quality_at_=0;goal_handle_.reset();tasks_.costmap["available"]=false;tasks_.motion=Json::Value();release();Config next(robot_configuration(root_));config_=std::move(next);gate_=hw_omni::AuthorityGate(config_.feedback_timeout);motion_gate_=hw_omni::MotionGate(config_.lio_timeout,config_.lio_velocity_std);tasks_.lio_ready=false;}
 private:
-  rclcpp::Node::SharedPtr node_;Tasks& tasks_;fs::path root_;Config config_;hw_omni::FeedbackGate gate_;
+  rclcpp::Node::SharedPtr node_;Tasks& tasks_;fs::path root_;Config config_;hw_omni::AuthorityGate gate_;hw_omni::MotionGate motion_gate_;
   tf2_ros::Buffer buffer_;tf2_ros::TransformListener listener_;
   rclcpp_action::Client<Navigate>::SharedPtr navigator_;rclcpp_action::Client<Plan>::SharedPtr planner_;
   rclcpp::Client<nav2_msgs::srv::ManageLifecycleNodes>::SharedPtr lifecycle_;
@@ -108,7 +105,7 @@ private:
   rclcpp::Publisher<shaoshao_hw_interfaces::msg::NavigationSession>::SharedPtr session_pub_;
   rclcpp::Publisher<nav2_msgs::msg::SpeedLimit>::SharedPtr speed_pub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr localization_,cloud_,motion_;
-  rclcpp::Subscription<shaoshao_hw_interfaces::msg::ChassisFeedback>::SharedPtr feedback_;
+  rclcpp::Subscription<shaoshao_hw_interfaces::msg::ControlAuthority>::SharedPtr authority_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odometry_,mapping_odom_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_,costmap_;
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_;rclcpp::TimerBase::SharedPtr timer_;
@@ -171,26 +168,25 @@ private:
       if(navigation){auto frames=YAML::LoadFile((root_/"navigation_runtime/frames.yaml").string());offset=yaml_point(frames["center_offset"]);}
       double yaw=std::atan2(transform.linear()(1,0),transform.linear()(0,0));
       if(navigation){
-        transform.translation()+=transform.linear()*offset;msg.pose.pose=to_ros(transform);msg.child_frame_id="navcar_center";
-        Point omega(msg.twist.twist.angular.x,msg.twist.twist.angular.y,msg.twist.twist.angular.z);
-        Point velocity(msg.twist.twist.linear.x,msg.twist.twist.linear.y,msg.twist.twist.linear.z);velocity+=omega.cross(offset);
-        if(!omega.allFinite()||!velocity.allFinite())return;
-        msg.twist.twist.linear.x=velocity.x();msg.twist.twist.linear.y=velocity.y();msg.twist.twist.linear.z=velocity.z();
-        Eigen::Matrix<double,6,6> j=Eigen::Matrix<double,6,6>::Identity();Eigen::Matrix3d skew;skew<<0,-offset.z(),offset.y(),offset.z(),0,-offset.x(),-offset.y(),offset.x(),0;j.block<3,3>(0,3)=-skew;
-        Eigen::Map<Eigen::Matrix<double,6,6,Eigen::RowMajor>> twist_cov(msg.twist.covariance.data());twist_cov=(j*twist_cov*j.transpose()).eval();
-        j.setIdentity();Point d=transform.linear()*(Point::UnitZ().cross(offset));j.block<3,1>(0,5)=d;
-        Eigen::Map<Eigen::Matrix<double,6,6,Eigen::RowMajor>> pose_cov(msg.pose.covariance.data());pose_cov=(j*pose_cov*j.transpose()).eval();
-        if(gate_.ready(node_->now().seconds())){msg.twist.twist.linear.x=gate_.sample()->vx;msg.twist.twist.linear.y=gate_.sample()->vy;}
+        msg=hw_omni::center_odometry(msg,offset);transform=ros_pose(msg.pose.pose);
+        if(motion_gate_.update(hw_omni::motion_sample(msg),node_->now().seconds())==hw_omni::SampleUpdate::replayed)return;
+        tasks_.lio_ready=motion_gate_.ready(node_->now().seconds());
         odom_pub_->publish(msg);
       }
       Json::Value p;p["x"]=transform.translation().x();p["y"]=transform.translation().y();p["z"]=transform.translation().z();p["yaw"]=yaw;p["frame"]=msg.header.frame_id;
       tasks_.local_pose=p;tasks_.odom_at=sample_steady(msg.header.stamp,node_->now().seconds(),steady(),.5);
-    }catch(const std::exception&){}
+    }catch(const std::exception&){
+      if(navigation){
+        msg.child_frame_id="navcar_center";msg.twist.twist.linear.x=std::numeric_limits<double>::quiet_NaN();
+        if(motion_gate_.update(hw_omni::motion_sample(msg),node_->now().seconds())==hw_omni::SampleUpdate::replayed)return;tasks_.lio_ready=motion_gate_.ready(node_->now().seconds());odom_pub_->publish(msg);
+      }
+    }
   }
   void tick(){
     std::lock_guard<std::recursive_mutex> lock(tasks_.mutex);double wall=steady(),clock=node_->now().seconds();
     tasks_.hardware(gate_.ready(clock),gate_.sample()?gate_.sample()->authority_epoch:0,
                     gate_.sample()&&!gate_.sample()->control_allowed);
+    tasks_.lio_ready=motion_gate_.ready(clock);if(tasks_.goal_pending&&!tasks_.lio_ready)tasks_.pause("FAST-LIO 速度不可用或不确定度过大");
     if(tasks_.mode!="navigation"||tasks_.switching){if(!lease_.empty()){cancel();release();}return;}
     // Cancel and retain the goal before Nav2's controller patience expires.
     // Waiting for the global correction timeout loses the action result first.

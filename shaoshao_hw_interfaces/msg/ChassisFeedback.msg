@@ -1,3 +1,5 @@
+# Legacy compatibility only; production navigation now uses FAST-LIO Odometry
+# and independent /hw/control_authority (ControlAuthority).
 # Samples are measurements at header.stamp, synchronized into the ROS clock.
 # frame_id: navcar_center; axes follow the lidar, origin is the yaw axis.
 # Never publish UART V1 target echoes as this message.

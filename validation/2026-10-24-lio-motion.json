@@ -1,0 +1,95 @@
+{
+  "date": "2026-10-24",
+  "change": "Use FAST-LIO fused IMU/LiDAR velocity as the only production motion estimate",
+  "data_flow": [
+    "/navcar/state_estimation (navcar_odom/navcar_imu)",
+    "center-point lever arm and covariance compensation",
+    "/navcar/odom (navcar_odom/navcar_center)",
+    "global planner initial speed, RouteTracker, MPC, independent braking relay, Nav2 stopped-goal checker"
+  ],
+  "motion_contract": {
+    "source": "FAST-LIO filter state.vel and bias-corrected radar/IMU angular velocity",
+    "timestamp": "LiDAR frame end; preserved through center bridge",
+    "max_age_s": 0.15,
+    "planar_velocity_std_limit_mps": 0.5,
+    "covariance_check": "finite, symmetric, PSD; planar principal variance <= limit^2",
+    "wheel_fallback": false
+  },
+  "authority_contract": {
+    "topic": "/hw/control_authority",
+    "message": "ControlAuthority",
+    "fields": [
+      "header",
+      "seq",
+      "authority_epoch",
+      "control_allowed"
+    ],
+    "velocity_or_relative_gimbal_angle_required": false,
+    "publisher": "verified hardware mode/DR16 adapter; never infer from ACK"
+  },
+  "verification": {
+    "build_packages": 8,
+    "ctest": [
+      "hw_navigation",
+      "lio_motion",
+      "runtime_core",
+      "serial_v2"
+    ],
+    "native_relay": "LIO stale/invalid guards, actual LIO braking path, authority takeover, unknown-space and prediction checks passed",
+    "python_tests": [
+      16,
+      104
+    ],
+    "javascript_suites": [
+      "navcar_move_ui",
+      "mobile_mapping_ui",
+      "lidar_mapping_ui",
+      "stream_ui"
+    ],
+    "ros_navigation": {
+      "original_blocked_goal_arrival_error_m": 0.019408045043305643,
+      "controller_failure_retry_count": 1,
+      "global_pose_error_m": 2.8243373395083517e-06,
+      "native_commands": 3322,
+      "max_command_speed_mps": 0.21714536823165712,
+      "recovery_states": [
+        "follow",
+        "stuck_reverse"
+      ],
+      "checks": [
+        "FAST-LIO is the only velocity source",
+        "Contradictory wheel/legacy ChassisFeedback ignored",
+        "Invalid LIO covariance pauses and restores original goal",
+        "Independent ControlAuthority takeover",
+        "UART1 V2 SI commands and body-frame measured feedback",
+        "V2 100 Hz repeated command sequence accepted",
+        "HW global planning plugin and MINCO profile",
+        "HW physical blockage triggers reverse and original-goal arrival",
+        "automatic unknown-pose GICP",
+        "FDDP activation",
+        "time-indexed predictions",
+        "synthetic FAST-LIO state and independent hardware authority",
+        "Web preview/goal",
+        "native CRC/ACK transport",
+        "localization loss stops",
+        "automatic replan/resume",
+        "explicit retry RPC and resume",
+        "manual takeover revokes lease",
+        "new explicit goal reaches target and stops",
+        "65-page stop capacity",
+        "orphan lease expires and reacquires",
+        "mode switch reloads MPC and UART limits",
+        "controller failure retains target beyond patience",
+        "original blocked destination reached and stopped",
+        "replan and continue to destination after recovery",
+        "cancel while waiting prevents restart"
+      ]
+    }
+  },
+  "limits": [
+    "No physical vehicle acceptance; full ROS run uses synthetic LIO, hardware authority and PTY MCU.",
+    "UART1 V2 still does not expose DR16 control mode; a real ControlAuthority input is required to release navigation.",
+    "Wheel telemetry remains diagnostic; NaN motor feedback still triggers the existing UART-side fault interlock.",
+    "FAST-LIO is an estimator, not a direct IMU velocity measurement; model tau remains a commissioning assumption."
+  ]
+}

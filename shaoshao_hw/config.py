@@ -7,7 +7,7 @@ SOURCE=Path(__file__).resolve().parent.parent
 RUNTIME=Path(os.environ.get('SHAOSHAO_HW_RUNTIME',str(Path.home()/'ccc/shaoshao-hw-runtime')))
 
 DEFAULTS={
- 'mpc':{'tau_x_s':.30,'tau_y_s':.30,'feedback_timeout_s':.15,
+ 'mpc':{'tau_x_s':.30,'tau_y_s':.30,'feedback_timeout_s':.15,'authority_timeout_s':.15,'lio_timeout_s':.15,'lio_velocity_std_limit_mps':.5,
         'prediction_timeout_s':.30,'obstacle_margin_m':.15},
  'obstacles':{'resolution_m':.05,'range_m':8.,'static_distance_m':.15,
               'association_gate_m':.8,'confirmations':3,'lost_timeout_s':.5,'velocity_decay_s':2.},
@@ -38,7 +38,7 @@ def load(path=None):
     reg=nav['registration']
     mpc=nav['mpc'];obstacles=nav['obstacles']
     if not (.02<=mpc['tau_x_s']<=3 and .02<=mpc['tau_y_s']<=3 and
-            mpc['feedback_timeout_s']<=.2 and mpc['prediction_timeout_s']<=.5):
+            mpc['feedback_timeout_s']<=.2 and mpc['authority_timeout_s']<=.2 and mpc['lio_timeout_s']<=.15 and mpc['lio_velocity_std_limit_mps']<=2 and mpc['prediction_timeout_s']<=.5):
         raise ValueError('Invalid MPC model/freshness bounds')
     if not (.02<=obstacles['resolution_m']<=.2 and 1<=obstacles['range_m']<=15 and
             type(obstacles['confirmations']) is int and 2<=obstacles['confirmations']<=10):
