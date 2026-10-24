@@ -10,5 +10,7 @@ float64 vx_mps
 float64 vy_mps
 # Actual CHASSIS angular velocity, not lidar angular velocity.
 float64 chassis_omega_radps
-# Lidar/gimbal heading minus chassis heading, positive counterclockwise.
+# Legacy optional field; unused by the current controller.
+# UART 0x82 revision 2 supplies velocities already in navcar_center axes.
+# In that mode this field is reserved zero, not a measured relative angle.
 float64 gimbal_relative_yaw_rad

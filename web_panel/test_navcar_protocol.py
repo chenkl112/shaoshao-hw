@@ -59,7 +59,9 @@ class NavcarTests(unittest.TestCase):
         parser = Parser();parser.feed(status()[:8], 0)
         self.assertEqual(parser.feed(status()[8:], .101), [])
         self.assertEqual(len(parser.feed(status(2), .11)), 1)
-        self.assertEqual(Parser().feed(status(0, (math.nan,0,0,0)), 0), [])
+        self.assertTrue(math.isnan(Parser().feed(status(0, (math.nan,0,0,0)), 0)[0].values[0]))
+        legacy=Session();legacy.receive(status(0, (math.nan,0,0,0)), 0)
+        self.assertIsNone(legacy.state)
         wrong = bytearray(status());wrong[2] = 2;wrong[-2:] = struct.pack('<H', crc16_modbus(wrong[2:-2]))
         self.assertEqual(Parser().feed(wrong, 0), [])
 

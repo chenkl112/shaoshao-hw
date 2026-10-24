@@ -18,6 +18,7 @@ from navcar_navigation_legacy import navigation_geometry,localization_quality
 from navcar_navigation_legacy import NavigationControl as BaseControl,NavigationBridge as BaseBridge
 from navcar_navigation_legacy import build_navigation_config as base_config
 from navcar_reference import shift_pose,shift_planar_covariance
+from navcar_feedback import rotate_world_xy_to_frame
 from robot_io import sample_monotonic_time
 
 
@@ -74,7 +75,11 @@ class NavigationControl(BaseControl):
         if self.error or self.starting or self.stopping or not self.running:return super().reason()
         if not p.nav_localized:return getattr(p.bridge,'localization_info',{}).get('message','等待自动定位')
         if p.bridge and not p.bridge.chassis_gate.ready(p.bridge.node.get_clock().now().nanoseconds*1e-9):
-            return p.bridge.chassis_gate.reason(p.bridge.node.get_clock().now().nanoseconds*1e-9)
+            now=p.bridge.node.get_clock().now().nanoseconds*1e-9
+            gate=p.bridge.chassis_gate
+            if gate.sample is None and getattr(p.bridge,'serial_ready',False):
+                return getattr(p.bridge,'serial_feedback_reason','') or gate.reason(now)
+            return gate.reason(now)
         return super().reason()
 
     def _start(self):
@@ -121,6 +126,8 @@ class NavigationBridge(BaseBridge):
         self.auto_resume=None;self.resume_phase=None;self._loss_cancel=False;self.manual_epoch=None
         self.stack_ready=False;self.startup_future=None
         self.motion_info={}
+        self.map_velocity_seq=0
+        self.map_velocity_epoch=time.time_ns()
         self.startup_client=node.create_client(ManageLifecycleNodes,'/navigation_lifecycle/manage_nodes')
         self.retry_client=node.create_client(Trigger,'/hw/localization/retry')
         self.session_pub=node.create_publisher(NavigationSession,'/hw/navigation_session',1)
@@ -132,6 +139,9 @@ class NavigationBridge(BaseBridge):
         self.subs.extend([node.create_subscription(String,'/hw/localization/status',self.quality,10),
                          node.create_subscription(ChassisFeedback,'/hw/chassis_feedback',self.chassis_feedback,10),
                          node.create_subscription(String,'/hw/command/status',self.command_status,1)])
+        self.map_velocity_sub=node.create_subscription(TwistStamped,'/navcar/chassis_velocity',
+                                                       self.map_velocity_feedback,10)
+        self.map_feedback_pub=node.create_publisher(ChassisFeedback,'/hw/chassis_feedback',10)
         self.status_thread=threading.Thread(target=self.poll_controller,daemon=True);self.status_thread.start()
 
     def reset_hw(self):
@@ -153,6 +163,40 @@ class NavigationBridge(BaseBridge):
                 self.clear_resume();self.panel.commands.clear()
                 if self.panel.nav_status in ('active','sending'):
                     self.panel.cancel_navigation()
+
+    def map_velocity_feedback(self,msg):
+        """Convert measured world XY into the navigation controller's base axes."""
+        from rclpy.duration import Duration
+        from rclpy.time import Time
+        from shaoshao_hw_interfaces.msg import ChassisFeedback
+        if msg.header.frame_id!='map':return
+        stamp_ns=msg.header.stamp.sec*1_000_000_000+msg.header.stamp.nanosec
+        now_ns=self.node.get_clock().now().nanoseconds
+        age=(now_ns-stamp_ns)*1e-9
+        vx,vy=msg.twist.linear.x,msg.twist.linear.y
+        if not 0<=age<=.15 or not all(math.isfinite(v) for v in (vx,vy)) or math.hypot(vx,vy)>3:return
+        frame=getattr(self.panel.navigation_control,'frames',{}).get('base_frame')
+        if not frame:return
+        try:
+            transform=self.tf.lookup_transform('map',frame,Time.from_msg(msg.header.stamp),
+                                               timeout=Duration(seconds=.02))
+            q=transform.transform.rotation
+            if not all(math.isfinite(v) for v in (q.x,q.y,q.z,q.w)):return
+            yaw=math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
+            forward,left=rotate_world_xy_to_frame(vx,vy,yaw)
+            if not all(math.isfinite(v) for v in (forward,left)):return
+        except Exception:
+            return
+        feedback=ChassisFeedback();feedback.header=msg.header;feedback.header.frame_id=frame
+        self.map_velocity_seq+=1
+        feedback.seq=self.map_velocity_seq
+        feedback.authority_epoch=self.map_velocity_epoch
+        # V2 has no UART arbitration or angular-rate fields; this marks only
+        # that the XY sample passed the upper-layer validity checks.
+        feedback.control_allowed=True
+        feedback.vx_mps=forward;feedback.vy_mps=left
+        feedback.chassis_omega_radps=0.;feedback.gimbal_relative_yaw_rad=0.
+        self.map_feedback_pub.publish(feedback)
 
     def retry_localization(self):
         from std_srvs.srv import Trigger
@@ -273,7 +317,8 @@ class NavigationBridge(BaseBridge):
             try:
                 state=self.request('/api/state')
                 with self.panel.lock:
-                    self.serial_ready=bool(state['connected'] and not state['error']);self.serial_checked=time.monotonic()
+                    self.serial_feedback_reason=state.get('navigation_feedback_reason','')
+                    self.serial_ready=bool(state['connected'] and not state['error'] and not state.get('feedback_error'));self.serial_checked=time.monotonic()
                     epoch=state.get('manual_epoch',0)
                     manual_changed=self.manual_epoch is not None and epoch!=self.manual_epoch
                     self.manual_epoch=epoch

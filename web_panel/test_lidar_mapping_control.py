@@ -140,6 +140,15 @@ class MappingStopTests(unittest.TestCase):
         finally:
             http.shutdown();http.server_close();thread.join(2);panel.close()
 
+    def test_standby_clears_obsolete_navigation_failure_and_saves_map(self):
+        nav=SimpleNamespace(active=False,error='previous index save failure')
+        panel=SimpleNamespace(navigation_control=nav,mapping_control=self.control,pose=None)
+        self.release.set()
+        LidarMappingPanelMixin.request_mode(panel,'idle')
+        self.control.worker.join(2)
+        self.assertEqual(nav.error,'')
+        self.assertTrue(self.control.status()['saved'])
+
 
 class MappingStartTests(unittest.TestCase):
     def setUp(self):

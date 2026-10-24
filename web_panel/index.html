@@ -38,10 +38,10 @@ canvas{width:100%;height:64vh;min-height:350px;display:block;touch-action:none}.
 </section>
 <section id="mapView" aria-label="建图地图" hidden>
 <div class="view-heading"><h2>建图地图</h2><small id="mapStatus" role="status">等待读取地图</small><button id="refreshMap">刷新地图</button><button id="fitMap">适应窗口</button></div>
-<div class="goal-bar"><span id="selectedGoal">未选择目标 · 请单击地图</span><button id="goGoal" disabled>前往目标</button><button id="cancelGoal" disabled>取消导航</button><button id="retryLocalization" disabled>重新定位</button><span id="navStatus" role="status">请先启动导航模式</span></div>
-<div class="view"><canvas id="savedMap" aria-label="已保存的二维栅格地图"></canvas><div class="empty" id="mapEmpty" role="status">正在读取地图…</div><div class="hint">单击选择目标 · 拖动平移 · 滚轮缩放 · 双击适应窗口</div></div>
+<div class="goal-bar"><span id="selectedGoal">未选择目标</span><button id="goGoal" disabled>前往目标</button><button id="cancelGoal" disabled>取消导航</button><button id="retryLocalization" disabled>重新定位</button><span id="navStatus" role="status">请先启动导航模式</span></div>
+<div class="view"><canvas id="savedMap" aria-label="已保存的二维栅格地图"></canvas><div class="empty" id="mapEmpty" role="status">正在读取地图…</div><div class="hint">拖动平移 · 滚轮缩放 · 双击适应窗口</div></div>
 <div class="stats"><span id="mapSize">地图尺寸 —</span><span id="mapResolution">分辨率 —</span><span id="mapOrigin">原点 —</span></div>
-<p class="map-note">点击顶部“导航”，定位就绪后单击地图自动预览路径，再点“前往目标”出发。蓝线为计算路线；绿色箭头为已确认定位，橙色箭头为待确认位置，黄色标记为选点。红色为障碍物，橙色区域为车体所需避障范围。无可行路径时会显示原因，请选择通路更宽的位置。</p>
+<p class="map-note">点击顶部“导航”，定位就绪后在地图选定目标并预览路径，再点“前往目标”出发。蓝线为计算路线；绿色箭头为已确认定位，橙色箭头为待确认位置，黄色标记为选点。红色为障碍物，橙色区域为车体所需避障范围。无可行路径时会显示原因，请选择通路更宽的位置。</p>
 </section>
 <div id="error" role="alert"></div>
 </main></div>
@@ -203,6 +203,7 @@ canvas.addEventListener('wheel',e=>{e.preventDefault();scale=Math.max(3,Math.min
 canvas.ondblclick=()=>{center=robot?[robot.x,robot.y,0]:displayPoints.length?displayPoints[Math.floor(displayPoints.length/2)].slice():[0,0,0];yaw=-.7;pitch=.85;scale=35};
 const mapCanvas=$('savedMap'),mapCtx=mapCanvas.getContext('2d');
 let mapImage=null,mapInfo=null,selectedGoal=null,mapRevision='',mapLoading=false,mapZoom=1,mapX=0,mapY=0,mapDrag=null,goalRequest=false,mapManualView=false;
+let cancelAfterGoal=false,goalSubmitting=false,navigationRequests=0;
 let planRequest=0,planError='',costmap=null,costmapLoading=false,costmapChecked=0;
 function matchingPlan(){
  const plan=lastState?.navigation?.plan,g=plan?.goal;
@@ -292,11 +293,12 @@ async function previewGoal(){
 function navigationControls(){
  const nav=lastState?.navigation,busy=['sending','active','canceling'].includes(nav?.status);
  const plan=matchingPlan();
- $('selectedGoal').textContent=selectedGoal?'目标：'+selectedGoal.x.toFixed(2)+', '+selectedGoal.y.toFixed(2)+' m':'未选择目标 · 请单击地图';
+ $('selectedGoal').textContent=selectedGoal?'目标：'+selectedGoal.x.toFixed(2)+', '+selectedGoal.y.toFixed(2)+' m':'未选择目标';
  $('goGoal').disabled=!connected||!!lastState?.preview||!nav?.ready||!selectedGoal||!mapImage||plan?.status!=='ready'||!!planError||goalRequest||busy||requesting;
- $('cancelGoal').disabled=!connected||goalRequest||(!busy&&!nav?.auto_resume_pending)||nav?.status==='canceling';
+ $('cancelGoal').disabled=goalRequest||(!selectedGoal&&!busy&&!nav?.auto_resume_pending)||nav?.status==='canceling';
  $('retryLocalization').disabled=!connected||goalRequest||lastState?.mode!=='navigation';
- let message=!connected?'网页连接断开':nav?.reason||(lastState?.preview?'当前仅可查看地图，自动导航尚未启动':'导航就绪 · 选择目标后点击“前往目标”');
+ const reason=nav?.reason==='等待新协议的底盘实际速度反馈'?'等待导航底盘反馈：云台坐标系实测速度、UART1 授权':nav?.reason;
+ let message=!connected?'网页连接断开':reason||(lastState?.preview?'当前仅可查看地图，自动导航尚未启动':'导航就绪 · 选择目标后点击“前往目标”');
  if(nav&&nav.status!=='idle')message+=' · '+nav.message;
  if(nav?.ready&&nav?.localization?.state==='degraded')message+=' · 定位退化，低速衔接';
  if(nav?.auto_resume_pending)message+=' · 定位恢复后将重新规划原目标，可点击取消';
@@ -305,12 +307,26 @@ function navigationControls(){
  $('navStatus').textContent=message;
 }
 async function navigationRequest(path,body){
- goalRequest=true;requestError='';navigationControls();
+ goalRequest=++navigationRequests>0;if(path==='/api/navigation/goal')goalSubmitting=true;
+ requestError='';navigationControls();
  try{lastState=await api(path,body)}catch(e){requestError=e.message;$('error').textContent=requestError}
- finally{goalRequest=false;navigationControls();drawMap()}
+ finally{
+  goalRequest=--navigationRequests>0;if(path==='/api/navigation/goal')goalSubmitting=false;
+  navigationControls();drawMap();
+  if(path==='/api/navigation/goal'&&cancelAfterGoal){cancelAfterGoal=false;navigationRequest('/api/navigation/cancel',{})}
+ }
 }
 $('goGoal').onclick=()=>{if(!$('goGoal').disabled&&selectedGoal)navigationRequest('/api/navigation/goal',{...selectedGoal})};
-$('cancelGoal').onclick=()=>{if(!$('cancelGoal').disabled)navigationRequest('/api/navigation/cancel',{})};
+function cancelMapGoal(){
+ selectedGoal=null;mapDrag=null;++planRequest;planError='';
+ const nav=lastState?.navigation;
+ navigationControls();drawMap();
+ // Cancel again after an in-flight goal completes, to handle reordered requests.
+ if(goalSubmitting)cancelAfterGoal=true;
+ if(connected&&(goalSubmitting||['sending','active'].includes(nav?.status)||nav?.auto_resume_pending))
+   navigationRequest('/api/navigation/cancel',{});
+}
+$('cancelGoal').onclick=()=>{if(!$('cancelGoal').disabled)cancelMapGoal()};
 $('retryLocalization').onclick=()=>{if(!$('retryLocalization').disabled)navigationRequest('/api/localization/retry',{})};
 function fitMap(){
  mapManualView=false;
@@ -372,7 +388,8 @@ mapCanvas.onpointermove=e=>{
  if(mapDrag.moved){mapManualView=true;mapX+=e.clientX-mapDrag.x;mapY+=e.clientY-mapDrag.y;drawMap()}
  mapDrag.x=e.clientX;mapDrag.y=e.clientY;
 };
-mapCanvas.onpointerup=e=>{if(mapDrag&&!mapDrag.moved)selectGoal(e);mapDrag=null};
+mapCanvas.onpointerup=e=>{if(e.button!==0)return;if(mapDrag&&!mapDrag.moved)selectGoal(e);mapDrag=null};
+mapCanvas.oncontextmenu=e=>{e.preventDefault();cancelMapGoal()};
 mapCanvas.onpointercancel=()=>mapDrag=null;
 mapCanvas.addEventListener('wheel',e=>{
  e.preventDefault();if(!mapImage)return;mapManualView=true;

@@ -1,10 +1,10 @@
 # 哨哨 HW 实车配置；Navcar 的运行入口见 deployment/README.md。
 version: 1
 robot:
-  across_flats_m: 0.550       # 正八边形对边距，含轮子和突出物，2026-10-21 修正
-  circumscribed_radius_m: 0.297658 # 0.550/(2*cos(pi/8))，向上取整到微米
-  length_m: 0.595316       # 通用入口备用包围尺寸；本导航使用上面的实测外接圆
-  width_m: 0.595316
+  across_flats_m: 0.540       # 正八边形对边距，含轮子和突出物，2026-10-24 沿用已确认的 540 mm 实车参数
+  circumscribed_radius_m: 0.292246 # 0.540/(2*cos(pi/8))，向上取整到微米
+  length_m: 0.584492       # 通用入口备用包围尺寸；本导航使用上面的实测外接圆
+  width_m: 0.584492
   lidar_bottom_height_m: 0.280 # 雷达底面离地高度，已确认
   lidar_height_m: 0.327    # 点云原点离地 = 底面 0.280 + 官方尺寸图 0.047，水平正装
 yaw:
@@ -21,7 +21,7 @@ yaw:
   feedback_timeout_s: 0.3
   settle_time_s: 0.5
 navigation:
-  max_speed_mps: 0.5
+  max_speed_mps: 0.3
   map_resolution_m: 0.025
   reference_point: yaw_axis
   # Initial whole-vehicle model, NOT coefficients identified on this robot.

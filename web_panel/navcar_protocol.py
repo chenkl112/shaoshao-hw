@@ -5,7 +5,7 @@ import struct
 import time
 
 HEADER = b'\xa5\x5a'
-CONTROL, ACK, STATE = 1, 0x80, 0x81
+CONTROL, ACK, STATE, EXTENDED_STATE = 1, 0x80, 0x81, 0x82
 
 
 def crc16_modbus(data):
@@ -47,11 +47,16 @@ class Parser:
     def __init__(self):
         self.buffer = bytearray()
         self.last_rx = None
+        self.frames_seen = {}
+        self.bytes_received = 0
+        self.crc_errors = 0
+        self.wire_versions = {}
 
     def feed(self, data, now):
         if self.last_rx is not None and now - self.last_rx > .1:
             self.buffer.clear()
         if data:
+            self.bytes_received += len(data)
             self.last_rx = now
             self.buffer.extend(data)
         packets = []
@@ -71,24 +76,37 @@ class Parser:
             if len(self.buffer) < total:
                 break
             if crc16_modbus(self.buffer[2:8+size]) != struct.unpack_from('<H', self.buffer, 8+size)[0]:
+                self.crc_errors += 1
                 del self.buffer[0]
                 continue
             payload = bytes(self.buffer[8:8+size])
             del self.buffer[:total]
+            self.wire_versions[version] = self.wire_versions.get(version, 0)+1
             if version != 1:
                 continue
+            key = f'0x{kind:02x}/{size}'
+            if key in self.frames_seen or len(self.frames_seen) < 32:
+                previous = self.frames_seen.get(key, {})
+                self.frames_seen[key] = {'count': previous.get('count', 0)+1,
+                    'sequence': seq, 'payload_hex': payload.hex()}
             if kind == ACK and size == 1:
                 packets.append(Packet(kind, seq, (payload[0],)))
             elif kind == STATE and size == 16:
                 values = struct.unpack('<4f', payload)
-                if all(math.isfinite(v) for v in values):
-                    packets.append(Packet(kind, seq, values))
+                # V2 uses NaN to report offline wheels. Keep the link heartbeat
+                # and expose invalidity immediately rather than retaining old speed.
+                packets.append(Packet(kind, seq, values))
+            elif kind == EXTENDED_STATE and size == 36:
+                packets.append(Packet(kind, seq, struct.unpack('<BBHIII5f', payload)))
         return packets
 
 
 class Session:
     """Each poll returns at most one packet to write; targets never queue up."""
-    def __init__(self):
+    def __init__(self, measured=False):
+        self.measured = measured
+        self.state_count = 0
+        self.accepted_values = None
         self.parser = Parser()
         self.sequence = None
         self.state = None
@@ -101,20 +119,29 @@ class Session:
         self.ack_time = None
 
     def receive(self, data, now):
+        extended = []
         for packet in self.parser.feed(data, now):
+            if packet.kind == EXTENDED_STATE:
+                extended.append(packet)
+                continue
+            if packet.kind == STATE and not self.measured and not all(math.isfinite(v) for v in packet.values):
+                continue
             if packet.kind == STATE:
                 self.state, self.state_time = packet, now
+                self.state_count += 1
                 if self.sequence is None and self.pending is None:
                     self.sequence = (packet.sequence + 1) & 65535
-            elif self.pending is not None and packet.sequence == self.sequence:
+            elif packet.kind == ACK and self.pending is not None and packet.sequence == self.sequence:
                 code = packet.values[0]
                 self.last_ack = code
                 if code in (0, 1):
+                    self.accepted_values = struct.unpack_from('<4f', self.pending, 8)
                     self.pending = None
                     self.sequence = (self.sequence + 1) & 65535
                     self.ack_time = now
                 else:
                     self.fail('MCU ACK=' + str(code))
+        return extended
 
     def fail(self, message):
         self.error = message
@@ -144,7 +171,15 @@ class Session:
 
 
 def stop_confirmed(session, after):
-    """Success requires a NEW accepted zero command and its periodic target echo."""
+    """Require a new zero ACK, followed by stopped wheel measurements (V2)."""
+    if session.measured:
+        return (not session.error and session.pending is None and session.last_ack in (0, 1)
+                and session.accepted_values is not None and not any(session.accepted_values[:3])
+                and session.ack_time is not None and session.ack_time >= after
+                and session.state_time is not None and 0 <= session.state_time-session.ack_time <= .3
+                and session.state.sequence == ((session.sequence-1) & 65535)
+                and all(math.isfinite(v) for v in session.state.values[:2])
+                and math.hypot(*session.state.values[:2]) <= .03)
     return (not session.error and session.pending is None and session.last_ack == 0
             and session.ack_time is not None and session.ack_time >= after
             and session.state_time is not None and session.state_time >= session.ack_time

@@ -12,7 +12,7 @@ sudo apt install build-essential cmake git python3-dev python3-colcon-common-ext
   python3-numpy python3-scipy python3-pil python3-yaml python3-serial \
   libeigen3-dev libpcl-dev libapr1-dev libcurl4-openssl-dev \
   libdrogon-dev libjsoncpp-dev libtrantor-dev uuid-dev zlib1g-dev libbrotli-dev \
-  libhiredis-dev libpq-dev libmariadb-dev libsqlite3-dev libyaml-cpp-dev \
+  libhiredis-dev libpq-dev libmysqlclient-dev libsqlite3-dev libyaml-cpp-dev \
   ros-jazzy-navigation2 ros-jazzy-nav2-bringup ros-jazzy-nav2-mppi-controller \
   ros-jazzy-pointcloud-to-laserscan ros-jazzy-pcl-ros ros-jazzy-pcl-conversions \
   ros-jazzy-ament-cmake-auto ros-jazzy-tf2-geometry-msgs
@@ -31,7 +31,7 @@ bash deployment/bootstrap.sh
 2. 第一次构建会生成运行目录 `config/serial.navcar.yaml` 和 `config/MID360_config.json`。后续修改串口和雷达网络时，修改这两个运行文件；构建不会覆盖它们。首次构建前修改 `robot.yaml` 对应项也可。
 3. 雷达网卡设置为 `192.168.10.100/24`，当前雷达为 `192.168.10.101`。按实际网卡配置，确保雷达网段不与其他接口冲突。
 4. 用 `ls -l /dev/serial/by-id/` 确认串口。必要时 `sudo usermod -aG dialout "$USER"` 后重新登录。
-5. 确认下位机使用 2,000,000 baud，并对失去指令做停车处理；原平移指令倍率为 10。横移、制动和 yaw 保持效果需实测。
+5. 确认下位机使用 2,000,000 baud，并对失去指令做停车处理；平移指令按 m/s 原值下发，倍率为 1。横移、制动和 yaw 保持效果需实测。
 
 本版需要 `/hw/chassis_feedback` 的真实 XY 速度、底盘角速度、云台相对角与硬件控制权。新串口适配器待协议确定后实现；没有反馈时导航保持停车。上位机发 SI 单位整车目标，电控完成坐标转换、四轮分配和电机闭环。小陀螺使用独立通道，原 V1 目标回显不能代替实测。
 

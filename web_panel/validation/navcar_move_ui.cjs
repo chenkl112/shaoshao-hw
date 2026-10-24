@@ -21,11 +21,11 @@ const context={document,window,location:{search:'?token=secret'},crypto:{randomU
   async fetch(path,args){
     if(args.body){
       const packet=JSON.parse(args.body);allCalls.push(packet);fakeOwner=packet.client;
-      if(path==='/api/command'){calls.push(packet);fakeSpin=packet.spin_enabled;fakeRate=packet.spin_rate}
+      if(path==='/api/command'){calls.push(packet);if('spin_enabled' in packet)fakeSpin=packet.spin_enabled;if('spin_rate' in packet)fakeRate=packet.spin_rate}
       if(path==='/api/yaw'){yawCalls.push(packet);fakeYaw=packet.angle_deg;fakeSpin=false}
       if(path==='/api/spin'){spinCalls.push(packet);fakeSpin=packet.enabled;fakeRate=packet.rate}
     }
-    return {ok:true,async json(){return {connected:true,error:'',max_strength:.3,control_started:false,yaw_target_deg:fakeYaw,feedback_targets:[0,0,0,fakeYaw],active:'stop',control_client:fakeOwner,spin:{enabled:fakeSpin,rate:fakeRate,max_rate:6}}}};
+    return {ok:true,async json(){return {connected:true,error:'',max_strength:.3,control_started:false,yaw_target_deg:fakeYaw,feedback_targets:null,feedback_measurements:{velocity_valid:true,xy_valid:true,forward_mps:.05,left_mps:-.02,omega_radps:.3,yaw_actual_deg:12},navigation_feedback_reason:'等待 0x82',active:'stop',control_client:fakeOwner,spin:{enabled:fakeSpin,rate:fakeRate,max_rate:6}}}};
   }};
 vm.createContext(context);vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1],context);
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
@@ -33,6 +33,10 @@ const event={preventDefault(){},pointerId:1};
 (async()=>{
   await flush();assert.equal(calls.length,0,'loading must not send control');
   assert.equal(allCalls.length,0,'loading must not change yaw or enable spin');
+  assert(elements.feedback.textContent.includes('XY'));
+  assert(elements.feedback.textContent.includes('前向 0.050 m/s'));
+  assert(!elements.feedback.textContent.includes('旋转'));
+  assert(!elements.feedback.textContent.includes('Yaw'));
   assert.equal(Number(elements.yawAngle.value),17,'initialize from target, never force zero');
   window.events.blur();await flush();assert.equal(calls.length,0,'idle blur must not take control');
   directions[0].events.pointerdown(event);await flush();assert.equal(calls.at(-1).action,'forward');
@@ -57,16 +61,17 @@ const event={preventDefault(){},pointerId:1};
   elements.yawAngle.value='179';elements.yawPlus.events.click();await flush();assert.equal(yawCalls.at(-1).angle_deg,-176);
   const yawCount=yawCalls.length;elements.yawAngle.value='999';elements.yawApply.events.click();await flush();assert.equal(yawCalls.length,yawCount);
   elements.spinToggle.events.click();await flush();assert.equal(spinCalls.at(-1).enabled,true);
-  intervals[0]();await flush();assert.equal(calls.at(-1).spin_enabled,true,'spin needs its own keepalive when stationary');
-  directions[0].events.pointerdown(event);await flush();assert.equal(calls.at(-1).spin_enabled,true);
-  directions[0].events.pointerup(event);await flush();assert.equal(calls.at(-1).action,'stop');assert.equal(calls.at(-1).spin_enabled,true,'release stops translation and retains explicitly enabled spin');
+  const stationaryCalls=calls.length;intervals[0]();await flush();assert.equal(calls.length,stationaryCalls,'backend latches spin; stationary page sends no keepalive');
+  directions[0].events.pointerdown(event);await flush();assert.equal(fakeSpin,true);
+  directions[0].events.pointerup(event);await flush();assert.equal(calls.at(-1).action,'stop');assert.equal(fakeSpin,true,'release stops translation and retains backend spin');
   elements.spinRate.value='6';elements.spinApply.events.click();await flush();assert.equal(spinCalls.at(-1).rate,6);
   elements.spinRate.value='-6';elements.spinApply.events.click();await flush();assert.equal(spinCalls.at(-1).rate,-6);
   const spinCount=spinCalls.length;elements.spinRate.value='6.01';elements.spinApply.events.click();await flush();assert.equal(spinCalls.length,spinCount);
   elements.spinRate.value='.1';
-  window.events.blur();await flush();assert.equal(calls.at(-1).spin_enabled,false);
+  window.events.blur();await flush();assert.equal(fakeSpin,true,'changing pages preserves backend spin');
+  elements.spinToggle.events.click();await flush();assert.equal(spinCalls.at(-1).enabled,false);
   elements.spinToggle.events.click();await flush();assert.equal(spinCalls.at(-1).enabled,true);
   elements.stop.events.click();await flush();assert.equal(calls.at(-1).spin_enabled,false);
   assert(allCalls.every((x,i)=>i===0||x.seq>allCalls[i-1].seq),'all control interfaces share sequence ordering');
-  console.log('Movement UI: directions, yaw targets, spin toggle/rate/heartbeat, stop and sequence checks passed');
+  console.log('Movement UI: directions, yaw targets, measured feedback, spin toggle/rate/latch, stop and sequence checks passed');
 })().catch(e=>{console.error(e);process.exitCode=1});

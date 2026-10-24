@@ -53,6 +53,35 @@ class ReferenceTests(unittest.TestCase):
             self.assertAlmostEqual(msg.twist.twist.linear.y,0.)
         self.assertEqual(panel.pose['reference_offset_xy_m'],offset[:2])
 
+    def test_map_xy_feedback_uses_map_to_base_heading_and_marks_only_xy_valid(self):
+        import time
+        from geometry_msgs.msg import TwistStamped
+        from rclpy.time import Time
+        now_ns=time.time_ns()
+        class Clock:
+            def now(self):return NS(nanoseconds=now_ns)
+        class Buffer:
+            def lookup_transform(self,target,source,stamp,timeout=None):
+                self.query=(target,source)
+                return NS(transform=NS(rotation=NS(x=0.,y=0.,z=math.sqrt(.5),w=math.sqrt(.5))))
+        published=[]
+        bridge=object.__new__(NavigationBridge)
+        bridge.node=NS(get_clock=lambda:Clock())
+        bridge.tf=Buffer();bridge.panel=NS(navigation_control=NS(frames={'base_frame':'navcar_center'}))
+        bridge.map_velocity_seq=0;bridge.map_velocity_epoch=123
+        bridge.map_feedback_pub=NS(publish=published.append)
+        sample=TwistStamped();sample.header.stamp=Time(nanoseconds=now_ns).to_msg()
+        sample.header.frame_id='map';sample.twist.linear.x=1.;sample.twist.linear.y=0.
+        NavigationBridge.map_velocity_feedback(bridge,sample)
+        self.assertEqual(bridge.tf.query,('map','navcar_center'))
+        self.assertEqual(len(published),1)
+        feedback=published[0]
+        self.assertEqual(feedback.header.frame_id,'navcar_center')
+        self.assertAlmostEqual(feedback.vx_mps,0.,places=6)
+        self.assertAlmostEqual(feedback.vy_mps,-1.,places=6)
+        self.assertEqual(feedback.chassis_omega_radps,0.)
+        self.assertTrue(feedback.control_allowed)
+
     def test_true_axis_position_is_stationary_while_offset_sensor_rotates(self):
         cfg=config();frames=navigation_frames(cfg,lio());offset=frames['center_offset']
         self.assertAlmostEqual(offset[0],.00318)

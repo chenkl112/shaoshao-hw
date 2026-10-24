@@ -1,6 +1,6 @@
 #include "hw_omni_controller/controller.hpp"
 #include "hw_omni_controller/ros_samples.hpp"
-#include <nav2_core/exceptions.hpp>
+#include <nav2_core/controller_exceptions.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <pluginlib/class_list_macros.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>

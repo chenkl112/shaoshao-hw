@@ -148,6 +148,7 @@ class LidarMappingPanelMixin:
         elif mode == 'idle':
             if nav and nav.active:nav.request_stop()
             else:
+                if nav:nav.error=''  # Explicit standby dismisses an inactive navigation failure.
                 if self.mapping_control.is_running() and self.pose:
                     try:(self.mapping_control.maps_dir/'last_pose.json').write_text(json.dumps(self.pose))
                     except OSError:pass  # An optional localization seed cannot prevent stopping.

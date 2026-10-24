@@ -8,7 +8,11 @@ def generate_launch_description():
     root=Path(os.environ.get('SHAOSHAO_HW_RUNTIME',str(Path.home()/'ccc/shaoshao-hw-runtime')))
     lio=yaml.safe_load((root/'mapping_runtime/fast_lio.yaml').read_text(encoding='utf-8'))
     resolution=lio['/**']['ros__parameters'].get('map_filter',{}).get('static_resolution',.025)
-    maps=Path((root/'current_mapping_dir').read_text(encoding='utf-8').strip())
+    # All consumers must use the same launch snapshot. The current-directory
+    # marker can still name preview while the parent starts this process.
+    map_file=lio['/**']['ros__parameters'].get('map_file_path')
+    maps=(Path(map_file).expanduser().resolve().parent if map_file else
+          Path((root/'current_mapping_dir').read_text(encoding='utf-8').strip()))
     nodes=[
       Node(package='shaoshao_hw_runtime',executable='index_recorder',parameters=[{'maps_dir':str(maps),'config_path':str(root/'shaoshao/web_panel/robot.yaml')}],output='screen'),
       Node(package='fast_lio',executable='fastlio_mapping',output='screen',parameters=[str(root/'mapping_runtime/fast_lio.yaml')],remappings=[('/Odometry','/state_estimation')]),

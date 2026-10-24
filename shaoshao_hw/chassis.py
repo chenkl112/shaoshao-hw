@@ -50,7 +50,7 @@ class FeedbackGate:
         if self.invalid:
             return '底盘实际速度反馈无效'
         if self.sample is None:
-            return '等待新协议的底盘实际速度反馈'
+            return '等待导航底盘反馈：云台坐标系实测速度、UART1 授权'
         if not -0.05 <= now-self.sample.stamp <= self.timeout:
             return '底盘实际速度反馈超时'
         if not self.sample.control_allowed:

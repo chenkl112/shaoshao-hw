@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent, hold-to-move Navcar controller. No ROS or mapping process changes."""
+"""Single-owner Navcar controller with measured feedback and optional ROS integration."""
 import argparse
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 from navcar_bridge import load_config, targets
 from navcar_protocol import Session
+from navcar_feedback import ExtendedFeedback, measured_state
 from navcar_settings import load_navigation_speed, navigation_speed
 
 
@@ -24,7 +25,10 @@ class Controller:
         self.config, self.clock = config, clock
         self.navigation_max_speed=min(navigation_speed({'navigation':{'max_speed_mps':navigation_max_speed_mps}}),self.max_speed())
         self.lock = threading.RLock()
-        self.session = Session()
+        self.measured = config.get('state_semantics') == 'wheel_velocity_v2'
+        self.extended_enabled = self.measured and config.get('feedback_protocol') == 'experimental_0x82'
+        self.session = Session(measured=self.measured)
+        self.extended = ExtendedFeedback()
         self.action, self.strength, self.updated = 'stop', .1, 0.
         self.owner, self.sequence = None, -1
         self.client_sequences = {}
@@ -33,15 +37,64 @@ class Controller:
         self.navigation_sequence = -1
         self.navigation_vector = (0., 0.)
         self.manual_epoch=0
-        self.spin_enabled, self.spin_rate, self.spin_updated = False, .1, 0.
-        self.yaw = None
+        self.spin_enabled, self.spin_rate = False, .1
+        self.yaw = config.get('yaw_target_deg') if self.measured and config.get('feedback_frame') == 'map' else None
         self.closed = threading.Event()
 
     def max_speed(self):
         return self.config['max_translation_units']/max(self.config['forward_units_per_mps'],self.config['left_units_per_mps'])
 
+    def feedback_fault(self):
+        s = self.session
+        if self.measured and s.state is not None and not measured_state(s.state.values)['velocity_valid']:
+            return '底盘四轮速度反馈无效'
+        if self.extended.sample is not None or self.extended.error:
+            return self.extended.reason(self.clock())
+        return ''
+
+    def navigation_feedback_reason(self):
+        if not self.measured:
+            return '旧版仅回显目标'
+        s=self.session
+        if s.error:return s.error
+        if s.state_time is None:
+            return '等待下位机 V2 的 0x81 状态帧'
+        if self.clock()-s.state_time >= .15:
+            return '下位机 V2 XY 速度反馈超时'
+        if self.feedback_fault():return self.feedback_fault()
+        if self.config.get('feedback_frame') == 'map':
+            return ''
+        if self.extended_enabled:
+            return self.extended.reason(self.clock())
+        return '已收到 0x81 底盘坐标速度；V2 未提供导航所需的朝向转换和 UART1 控制模式反馈'
+
+    def navigation_feedback_ready(self):
+        return self.measured and not self.navigation_feedback_reason()
+
+    def receive_serial(self, data, now):
+        old = self.extended.sample
+        for packet in self.session.receive(data, now):
+            if self.extended_enabled:
+                self.extended.receive(packet.values, now)
+        new = self.extended.sample
+        takeover = old and new and old['authority_epoch'] != new['authority_epoch']
+        if self.feedback_fault() or takeover:
+            self.spin_enabled = False
+            self.action = 'stop'; self.updated = 0.
+            self.navigation_vector = (0., 0.)
+            self.navigation_lease = None
+        if self.yaw is None and self.session.state is not None:
+            angle = self.session.state.values[3]
+            if math.isfinite(angle): self.yaw = angle
+
     def spin_live(self):
-        return self.spin_enabled and self.clock()-self.spin_updated < .2
+        # Spin is explicitly latched by the backend, independent of browser life.
+        # Clear on a fault so fresh feedback cannot silently restart rotation.
+        with self.lock:
+            if (self.closed.is_set() or self.session.error or self.feedback_fault() or self.session.state_time is None
+                    or self.clock()-self.session.state_time >= .3):
+                self.spin_enabled = False
+            return self.spin_enabled
 
     def validate_spin(self, enabled, rate):
         if type(enabled) is not bool:raise ValueError('enabled必须为true或false')
@@ -52,7 +105,7 @@ class Controller:
     def accept_manual(self, client, seq, wants_motion, takeover=False):
         if not isinstance(client,str) or not 1 <= len(client) <= 80 or type(seq) is not int or not 0 <= seq <= 2**53:
             raise ValueError('无效控制会话或序号')
-        if wants_motion and (not self.state()['connected'] or self.session.error or self.yaw is None):
+        if wants_motion and (not self.state()['connected'] or self.session.error or self.feedback_fault() or self.yaw is None):
             raise RuntimeError('下位机未就绪')
         if seq <= self.client_sequences.get(client,-1):return False
         if client not in self.client_sequences and len(self.client_sequences)>=64:
@@ -82,7 +135,21 @@ class Controller:
                     'spin': {'enabled': self.spin_live(), 'rate': self.spin_rate,
                              'max_rate': self.config['max_rot_units']/self.config['rot_units_per_radps'], 'unit': 'command'},
                     'yaw_target_deg': self.yaw, 'last_ack': s.last_ack,
-                    'feedback_targets': s.state.values if s.state else None,
+                    'serial_rx': dict(s.parser.frames_seen),
+                    'serial_rx_bytes': s.parser.bytes_received,
+                    'serial_crc_errors': s.parser.crc_errors,
+                    'serial_wire_versions': dict(s.parser.wire_versions),
+                    'serial_rx_age_s': round(now-s.parser.last_rx,3) if s.parser.last_rx is not None else None,
+                    'feedback_protocol': 'experimental_0x82' if self.extended_enabled else 'navcar_uart1_v2' if self.measured else 'targets_v1',
+                    'feedback_capabilities': {'velocity_frame':self.config.get('feedback_frame','navcar_chassis') if self.measured else None,
+                        'measured_velocity':self.measured,'control_mode_reported':self.extended_enabled,
+                        'native_navigation_supported':self.measured and self.config.get('feedback_frame') == 'map'},
+                    'feedback_sample_count': s.state_count,
+                    'feedback_targets': s.state.values if s.state and not self.measured else None,
+                    'feedback_measurements': measured_state(s.state.values,self.config.get('feedback_frame','navcar_chassis')) if self.measured and s.state else None,
+                    'feedback_error': self.feedback_fault(),
+                    'extended_feedback': {**self.extended.sample, 'ready':self.extended.ready(now)} if self.extended.sample else None,
+                    'navigation_feedback_reason': self.navigation_feedback_reason(),
                     'feedback_age_s': round(now-s.state_time,3) if s.state_time is not None else None}
 
     def command(self, data):
@@ -94,13 +161,14 @@ class Controller:
             raise ValueError('速度倍率已更新，请刷新移动网页后操作')
         if type(strength) not in (int,float) or not math.isfinite(strength) or not 0 < strength <= self.max_speed():
             raise ValueError('目标速度超出范围')
-        spin_enabled,spin_rate=data.get('spin_enabled',False),data.get('spin_rate',self.spin_rate)
-        self.validate_spin(spin_enabled,spin_rate)
         with self.lock:
+            explicit_spin = 'spin_enabled' in data
+            spin_enabled,spin_rate=data.get('spin_enabled',self.spin_live()),data.get('spin_rate',self.spin_rate)
+            self.validate_spin(spin_enabled,spin_rate)
             now=self.clock()
-            if not self.accept_manual(client,seq,action!='stop' or spin_enabled):return
+            if not self.accept_manual(client,seq,action!='stop' or (explicit_spin and spin_enabled)):return
             self.action, self.strength, self.updated = action, float(strength), now
-            self.spin_enabled,self.spin_rate,self.spin_updated=spin_enabled,float(spin_rate),now
+            if explicit_spin:self.spin_enabled,self.spin_rate=spin_enabled,float(spin_rate)
             self.armed = True
 
     def set_yaw(self, data):
@@ -127,7 +195,11 @@ class Controller:
 
     def acquire_navigation(self):
         with self.lock:
-            if not self.state()['connected'] or self.session.error or self.yaw is None:
+            if self.measured and not self.navigation_feedback_ready():
+                raise RuntimeError(self.navigation_feedback_reason())
+            if self.extended_enabled and self.config.get('feedback_frame') != 'map' and not self.extended.ready(self.clock()):
+                raise RuntimeError(self.extended.reason(self.clock()))
+            if not self.state()['connected'] or self.session.error or self.feedback_fault() or self.yaw is None:
                 raise RuntimeError('下位机未就绪')
             if self.navigation_lease or self.spin_live() or (self.action != 'stop' and self.clock()-self.updated < .2):
                 raise RuntimeError('控制器正在使用，请先停止当前控制')
@@ -147,9 +219,13 @@ class Controller:
             raise ValueError(f'导航速度上限为{self.navigation_max_speed:g}米/秒')
         if type(seq) is not int or not 0 <= seq <= 2**53:raise ValueError('无效导航序号')
         with self.lock:
+            if self.measured and not self.navigation_feedback_ready():
+                raise RuntimeError(self.navigation_feedback_reason())
+            if self.extended_enabled and self.config.get('feedback_frame') != 'map' and not self.extended.ready(self.clock()):
+                raise RuntimeError(self.extended.reason(self.clock()))
             if not self.navigation_lease or data.get('lease') != self.navigation_lease:
                 raise RuntimeError('导航控制权已失效，可能已被手动接管')
-            if not self.state()['connected'] or self.session.error:raise RuntimeError('下位机未就绪')
+            if not self.state()['connected'] or self.session.error or self.feedback_fault():raise RuntimeError('下位机未就绪')
             if seq <= self.navigation_sequence:return
             self.navigation_sequence=seq
             self.spin_enabled=False
@@ -178,8 +254,8 @@ class Controller:
                 now=self.clock()
                 data=port.read(min(port.in_waiting,4096))
                 with self.lock:
-                    s=self.session;s.receive(data,now)
-                    if self.yaw is None and s.state is not None:self.yaw=s.state.values[3]
+                    self.spin_live()  # Observe a feedback gap before accepting a fresh packet.
+                    s=self.session;self.receive_serial(data,now)
                     if self.armed and not s.error:
                         values=self.desired()
                         # Never retry an unacknowledged movement after release/timeout.
@@ -189,6 +265,7 @@ class Controller:
                         else:
                             packet=s.poll(values,now)
                             if packet and port.write(packet) != len(packet):raise IOError('串口发送不完整')
+                    self.spin_live()  # Latch off immediately after ACK/poll failures.
                 self.closed.wait(.002)
         except Exception as exc:
             with self.lock:self.session.fail(str(exc))
@@ -200,7 +277,7 @@ class Controller:
                 try:
                     now=self.clock()
                     with self.lock:
-                        self.session.receive(port.read(min(port.in_waiting,4096)),now)
+                        self.receive_serial(port.read(min(port.in_waiting,4096)),now)
                         pending=self.session.pending
                         if pending and any(struct.unpack_from('<4f',pending,8)[:3]):
                             if now-self.session.sent_at >= .05:break
@@ -295,12 +372,56 @@ def main():
     ros_node=None;ros_thread=None
     if args.hw_ros:
         import rclpy
-        from shaoshao_hw_interfaces.msg import NavCommand
+        from shaoshao_hw_interfaces.msg import NavCommand, ChassisFeedback
+        from geometry_msgs.msg import TwistStamped
+        from std_msgs.msg import String
         rclpy.init(args=[]);ros_node=rclpy.create_node('shaoshao_hw_serial')
         def receive(msg):
             try:receive_ros_command(controller,msg,ros_node.get_clock().now().nanoseconds)
             except (ValueError,RuntimeError):pass  # Invalid/stale leases cannot affect manual control.
         ros_node.create_subscription(NavCommand,'/hw/nav_command',receive,1)
+        wheel_pub=ros_node.create_publisher(TwistStamped,'/navcar/chassis_velocity',10)
+        feedback_pub=ros_node.create_publisher(ChassisFeedback,'/hw/chassis_feedback',10)
+        status_pub=ros_node.create_publisher(String,'/navcar/chassis_feedback/status',10)
+        last_raw=0;last_extended=None
+        def publish_feedback():
+            nonlocal last_raw,last_extended
+            now=time.monotonic();ros_now=ros_node.get_clock().now().nanoseconds
+            with controller.lock:
+                s=controller.session
+                if controller.measured and s.state is not None and s.state_count!=last_raw:
+                    last_raw=s.state_count
+                    value=measured_state(s.state.values,controller.config.get('feedback_frame','navcar_chassis'))
+                    age=now-s.state_time
+                    stamp=rclpy.time.Time(nanoseconds=max(0,ros_now-int(age*1e9))).to_msg()
+                    # Invalid samples revoke validity via status; never publish a fake zero twist.
+                    if value['velocity_valid'] and 0 <= age <= .15:
+                        msg=TwistStamped();msg.header.stamp=stamp;msg.header.frame_id=value['frame']
+                        msg.twist.linear.x=value['forward_mps'];msg.twist.linear.y=value['left_mps']
+                        msg.twist.angular.z=value['omega_radps'] if value['omega_valid'] else 0.
+                        wheel_pub.publish(msg)
+                sample=controller.extended.sample
+                key=(sample['authority_epoch'],sample['seq']) if sample else None
+                if key is not None and key!=last_extended:
+                    last_extended=key
+                    age=now-sample['stamp']
+                    if 0 <= age <= .15 and not controller.extended.error:
+                        msg=ChassisFeedback()
+                        msg.header.stamp=rclpy.time.Time(nanoseconds=max(0,ros_now-int(age*1e9))).to_msg()
+                        msg.header.frame_id='navcar_center'
+                        for name in ('seq','authority_epoch','control_allowed','vx_mps','vy_mps',
+                                     'chassis_omega_radps','gimbal_relative_yaw_rad'):
+                            setattr(msg,name,sample[name])
+                        feedback_pub.publish(msg)
+                report=String();report.data=json.dumps({'stamp_ns':ros_now,
+                    'velocity_source':'navcar_uart1_v2_0x81' if controller.measured else 'targets_v1',
+                    'raw_velocity_valid':bool(controller.measured and s.state and now-s.state_time<=.15
+                        and measured_state(s.state.values)['velocity_valid']),
+                    'feedback_protocol':'experimental_0x82' if controller.extended_enabled else 'navcar_uart1_v2',
+                    'navigation_ready':controller.navigation_feedback_ready(),
+                    'message':controller.feedback_fault() or controller.navigation_feedback_reason()},allow_nan=False)
+                status_pub.publish(report)
+        ros_node.create_timer(.01,publish_feedback)
         ros_thread=threading.Thread(target=rclpy.spin,args=(ros_node,),daemon=True);ros_thread.start()
     print(f'NAVCAR MOVE: http://192.168.1.194:{args.port}/?token={token}',flush=True)
     def interrupt(*_):raise KeyboardInterrupt

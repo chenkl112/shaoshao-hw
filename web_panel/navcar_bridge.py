@@ -8,6 +8,7 @@ import signal
 import time
 
 from navcar_protocol import Session, stop_confirmed
+from navcar_feedback import measured_state
 
 
 def load_config(path, control=False):
@@ -19,12 +20,28 @@ def load_config(path, control=False):
         raise ValueError('Fill serial_port with the actual /dev/serial/by-id/...')
     if config.get('baud') != 2000000:
         raise ValueError('Navcar requires baud=2000000')
+    semantics = config.get('state_semantics', 'targets_v1')
+    if semantics not in ('targets_v1', 'wheel_velocity_v2'):
+        raise ValueError('state_semantics must be targets_v1 or wheel_velocity_v2')
+    if type(config.get('require_extended_feedback_for_navigation', False)) is not bool:
+        raise ValueError('require_extended_feedback_for_navigation must be bool')
+    profile = config.get('feedback_protocol', 'navcar_uart1_v2')
+    if profile not in ('navcar_uart1_v2', 'experimental_0x82'):
+        raise ValueError('feedback_protocol must be navcar_uart1_v2 or experimental_0x82')
+    if profile == 'experimental_0x82' and semantics != 'wheel_velocity_v2':
+        raise ValueError('experimental_0x82 requires wheel_velocity_v2 semantics')
+    feedback_frame = config.get('feedback_frame', 'navcar_chassis')
+    if feedback_frame not in ('navcar_chassis', 'map'):
+        raise ValueError('feedback_frame must be navcar_chassis or map')
     if control:
         for key in ('forward_units_per_mps', 'left_units_per_mps',
                     'rot_units_per_radps', 'max_translation_units', 'max_rot_units'):
             v = config.get(key)
             if type(v) not in (int, float) or not math.isfinite(v) or v <= 0:
                 raise ValueError('Measure and fill positive ' + key)
+        if semantics == 'wheel_velocity_v2' and any(config[k] != 1 for k in
+                ('forward_units_per_mps', 'left_units_per_mps', 'rot_units_per_radps')):
+            raise ValueError('V2 uses SI units directly; all speed multipliers must be 1')
         angle = config.get('yaw_target_deg')
         if type(angle) not in (int, float) or not math.isfinite(angle):
             raise ValueError('Fill finite yaw_target_deg (startup heading reference)')
@@ -32,11 +49,11 @@ def load_config(path, control=False):
 
 
 def targets(velocity, config):
-    """ROS-style yaw-frame forward/left/CCW -> native forward/right/CW."""
+    """ROS yaw-frame forward/left/CCW -> native forward/right; V2 rot is CCW."""
     forward, left, ccw = velocity
     values = (forward * config['forward_units_per_mps'],
               -left * config['left_units_per_mps'],
-              -ccw * config['rot_units_per_radps'])
+              ccw * config['rot_units_per_radps'] * (1 if config.get('state_semantics') == 'wheel_velocity_v2' else -1))
     limits = (config['max_translation_units'], config['max_translation_units'], config['max_rot_units'])
     if not all(math.isfinite(v) and abs(v) <= limit for v, limit in zip(values, limits)):
         raise ValueError('Command exceeds commissioned native-unit limits')
@@ -64,7 +81,7 @@ def main(argv=None):
                          bytesize=8, parity='N', stopbits=1, xonxoff=False, rtscts=False, dsrdtr=False,
                          exclusive=True)
     port.reset_input_buffer()
-    session = Session()
+    session = Session(measured=config.get('state_semantics') == 'wheel_velocity_v2')
     node = None
     velocity, command_time = (0., 0., 0.), 0.
     stopped, armed = False, False
@@ -127,6 +144,10 @@ def main(argv=None):
                           'targets_vy_vx_rot_yaw_deg': state.values if state else None,
                           'status_age_s': now-session.state_time if state else None,
                           'last_ack': session.last_ack, 'error': session.error}
+                if session.measured:
+                    report.update(feedback_kind='wheel_velocity_v2', measured_yaw_available=True,
+                        targets_vy_vx_rot_yaw_deg=None,
+                        measurements=measured_state(state.values) if state else None)
                 encoded = json.dumps(report, allow_nan=False)
                 if node:
                     msg = String();msg.data = encoded;status_pub.publish(msg)

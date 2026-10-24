@@ -45,7 +45,7 @@ class NativeMCU:
                 if kind==1 and size==16:
                     native=struct.unpack('<4f',packet[8:-2]);self.seq=seq;self.command_at=now
                     with self.lock:
-                        self.target=np.array([native[0]/10,-native[1]/10])
+                        self.target=np.array([native[0],-native[1]])
                         self.commands.append((now,*self.target,native[2],native[3]))
                     os.write(self.master,frame(ACK,seq,b'\x00'))
             with self.lock:
@@ -53,7 +53,7 @@ class NativeMCU:
                 self.velocity+=(target-self.velocity)*min(1.,dt/.12)
                 self.position+=self.velocity*dt
             if now-last_state>.04:
-                os.write(self.master,frame(STATE,self.seq,struct.pack('<4f',self.target[0]*10,-self.target[1]*10,0,17)));last_state=now
+                os.write(self.master,frame(STATE,self.seq,struct.pack('<4f',self.target[0],-self.target[1],0,17)));last_state=now
     def close(self):
         self.closed.set();self.thread.join(1);os.close(self.master);os.close(self.slave)
 
@@ -184,7 +184,7 @@ def main():
         state=api(8080,'/api/state')['navigation']
         assert state['status'] not in ('active','sending') and not state['auto_resume_pending']
         assert math.hypot(mcu.commands[-1][1],mcu.commands[-1][2])<1e-5
-        assert max(math.hypot(c[1],c[2]) for c in mcu.commands)<=.50001
+        assert max(math.hypot(c[1],c[2]) for c in mcu.commands)<=float(yaml.safe_load((SOURCE/'web_panel/robot.yaml').read_text())['navigation']['max_speed_mps'])+1e-5
         result={'global_pose_error_m':float(np.linalg.norm([recovered['x']-expected[0],recovered['y']-expected[1]])),
                 'native_commands':len(mcu.commands),'max_command_speed_mps':max(math.hypot(c[1],c[2]) for c in mcu.commands),
                 'checks':['automatic unknown-pose GICP','FDDP activation','time-indexed predictions','synthetic measured feedback','Web preview/goal','native CRC/ACK transport',

@@ -136,7 +136,9 @@ class CoreTests(unittest.TestCase):
     def test_fddp_configuration_uses_whole_vehicle_feedback_and_map_predictions(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);web=root/'shaoshao/web_panel';web.mkdir(parents=True)
-            (web/'robot.yaml').write_bytes((ROOT/'web_panel/robot.yaml').read_bytes())
+            robot=yaml.safe_load((ROOT/'web_panel/robot.yaml').read_text())
+            robot['navigation']['max_speed_mps']=.5  # Fixture is independent of commissioned vehicle limits.
+            (web/'robot.yaml').write_text(yaml.safe_dump(robot))
             runtime=root/'mapping_runtime';runtime.mkdir()
             lio={'/**':{'ros__parameters':{'common':{},'pcd_save':{},'publish':{},'map_filter':{},
                  'mapping':{'extrinsic_T':[-.011,-.02329,.04412],'extrinsic_R':[1,0,0,0,1,0,0,0,1]}}}}

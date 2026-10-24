@@ -35,7 +35,7 @@ def main():
         except (ValueError,OSError):running=False
         if running:
             print('网页已运行，保留当前建图/待机状态。')
-            print('WEB','http://<vehicle-ip>:8080/?token='+token)
+            print('WEB','http://192.168.1.194:8080/?token='+token)
             return
     current=root/'current_mapping_dir'
     if current.exists():maps=Path(current.read_text(encoding='utf-8').strip())
@@ -58,7 +58,7 @@ def main():
     time.sleep(1)
     if proc.poll() is not None:raise RuntimeError('Web exited; inspect ~/ccc/web.log')
     print('实时点云网页已启动；本命令不启动建图，点击网页“开始建图”后创建新地图。')
-    print('WEB','http://<vehicle-ip>:8080/?token='+token)
+    print('WEB','http://192.168.1.194:8080/?token='+token)
 
 
 if __name__=='__main__':main()
